@@ -105,3 +105,13 @@ FROM (
     FROM automap_pixels(map_name, width, height, 2.0)
     GROUP BY y
 );
+
+
+-- The automap as a framebuffer: width * height * 3 bytes of RGB, row by row, in a single BLOB.
+-- Each pixel becomes 6 hex digits; one string_agg in screen order and unhex() turn them into bytes.
+CREATE OR REPLACE TEMP MACRO automap_rgb(map_name, width, height) AS TABLE
+SELECT unhex(string_agg(CASE kind WHEN 'player' THEN '00ff00' WHEN 'wall' THEN 'ff0000'
+                                  WHEN 'floor' THEN 'bc7848' WHEN 'ceiling' THEN 'fcfc00'
+                                  WHEN 'plain' THEN '808080' ELSE '000000' END,
+                        '' ORDER BY y, x)) AS rgb
+FROM automap_pixels(map_name, width, height, 1.0);
