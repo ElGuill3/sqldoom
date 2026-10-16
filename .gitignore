@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Game data is downloaded locally, never committed.
+wad/
+
+# Generated databases.
+*.duckdb
+*.duckdb.wal
+
+# Agent harness cache.
+.atl/
