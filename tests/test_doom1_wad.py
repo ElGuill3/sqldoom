@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import query, run_automap, run_import
+from conftest import query, render_query, run_automap, run_import
 
 WAD = Path(os.environ.get("SQLDOOM_WAD", Path(__file__).parent.parent / "wad" / "doom1.wad"))
 
@@ -77,6 +77,16 @@ def test_bsp_tree_has_one_more_leaf_than_nodes(db):
 @pytest.mark.parametrize("check", ORPHANS)
 def test_cross_references_resolve(db, check):
     assert query(db, ORPHANS[check]) == []
+
+
+def test_point_sector_at_the_player_start(db):
+    """D5: walk from the root node (front when (py-n.y)*dx < dy*(px-n.x)), take the
+    subsector's first seg, its linedef, and the sidedef picked by seg direction.
+    An independent plain-Python walk of E1M1's tree puts the player 1 start
+    (1056, -3616) in sector 38 (floor 0, ceiling 72); the SQL macro must agree.
+    """
+    assert render_query(db, "SELECT sector FROM point_sector('E1M1', 1056, -3616)") == [(38,)]
+    assert query(db, "SELECT floor_height, ceiling_height FROM sectors WHERE map = 'E1M1' AND id = 38") == [(0, 72)]
 
 
 # Golden fingerprints of real automap output. A refactor of the screen transform once moved

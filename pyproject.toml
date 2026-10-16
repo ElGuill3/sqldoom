@@ -8,6 +8,7 @@ dependencies = ["duckdb>=1.1"]
 [project.scripts]
 sqldoom-import = "sqldoom.cli:main"
 sqldoom-automap = "sqldoom.automap:main"
+sqldoom-render = "sqldoom.render:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]

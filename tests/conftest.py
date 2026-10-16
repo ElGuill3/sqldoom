@@ -1,5 +1,6 @@
 import subprocess
 import sys
+from importlib.resources import files
 from pathlib import Path
 
 import duckdb
@@ -22,8 +23,19 @@ def run_automap(*args, text: bool = True) -> subprocess.CompletedProcess:
     return run_module("sqldoom.automap", *args, text=text)
 
 
+def run_render(*args) -> subprocess.CompletedProcess:
+    return run_module("sqldoom.render", *args)
+
+
 def query(db: Path, sql: str) -> list[tuple]:
     with duckdb.connect(str(db), read_only=True) as con:
+        return con.execute(sql).fetchall()
+
+
+def render_query(db: Path, sql: str) -> list[tuple]:
+    """Run SQL with the render macros loaded (TEMP macros live per connection)."""
+    with duckdb.connect(str(db)) as con:
+        con.execute(files("sqldoom").joinpath("sql/render.sql").read_text())
         return con.execute(sql).fetchall()
 
 

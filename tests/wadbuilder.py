@@ -26,29 +26,55 @@ def write_wad(path: Path, lumps: list[tuple[str, bytes]], magic: bytes = b"IWAD"
     return path
 
 
-def map_lumps(marker, vertexes, linedefs, sidedefs, sectors, things) -> list[tuple[str, bytes]]:
-    """A map from plain tuples; BSP lumps are left empty (the automap does not need them).
+def map_lumps(
+    marker, vertexes, linedefs, sidedefs, sectors, things,
+    segs=(), ssectors=(), nodes=(),
+) -> list[tuple[str, bytes]]:
+    """A map from plain tuples.
 
-    linedefs: (v1, v2, front_sidedef, back_sidedef or None); sidedefs: sector per side;
-    sectors: (floor_height, ceiling_height); things: (x, y, type).
+    linedefs: (v1, v2, front_sidedef, back_sidedef or None); sidedefs: sector, or
+    (sector, middle, upper, lower) textures; sectors: (floor, ceiling), or
+    (floor, ceiling, floor_texture, ceiling_texture, light_level); things:
+    (x, y, type), or (x, y, angle, type) with angle in degrees. BSP lumps default to
+    empty (the automap does not need them): segs: (v1, v2, angle_bam, linedef,
+    direction, offset); ssectors: (seg_count, first_seg); nodes: (x, y, dx, dy,
+    right_child, left_child, right_is_ssector, left_is_ssector).
     """
+    def sidedef(s) -> bytes:
+        # WAD SIDEDEFS store upper, lower, middle; tuples here are (sector, middle, upper, lower).
+        sector, *textures = s if isinstance(s, tuple) else (s,)
+        middle, upper, lower = (*textures, *(["-"] * 3))[:3]
+        return (struct.pack("<hh", 0, 0)
+                + name8(upper) + name8(lower) + name8(middle)
+                + struct.pack("<H", sector))
+
     return [
         (marker, b""),
-        ("THINGS", b"".join(struct.pack("<5h", x, y, 90, t, 7) for x, y, t in things)),
+        ("THINGS", b"".join(
+            struct.pack("<5h", x, y, *(rest if len(rest) == 2 else (90, rest[0])), 7)
+            for x, y, *rest in things
+        )),
         ("LINEDEFS", b"".join(
             struct.pack("<HHhhhHH", a, b, 0, 0, 0, front, 0xFFFF if back is None else back)
             for a, b, front, back in linedefs
         )),
-        ("SIDEDEFS", b"".join(
-            struct.pack("<hh", 0, 0) + name8("-") * 3 + struct.pack("<H", s) for s in sidedefs
-        )),
+        ("SIDEDEFS", b"".join(sidedef(s) for s in sidedefs)),
         ("VERTEXES", b"".join(struct.pack("<2h", x, y) for x, y in vertexes)),
-        ("SEGS", b""),
-        ("SSECTORS", b""),
-        ("NODES", b""),
+        ("SEGS", b"".join(struct.pack("<HHHHhh", *s) for s in segs)),
+        ("SSECTORS", b"".join(struct.pack("<HH", *ss) for ss in ssectors)),
+        ("NODES", b"".join(
+            struct.pack("<4h4h4h", x, y, dx, dy, 0, 0, 0, 0, 0, 0, 0, 0)
+            + struct.pack("<HH",
+                          right | (0x8000 if right_is_ssector else 0),
+                          left | (0x8000 if left_is_ssector else 0))
+            for x, y, dx, dy, right, left, right_is_ssector, left_is_ssector in nodes
+        )),
         ("SECTORS", b"".join(
-            struct.pack("<hh", f, c) + name8("FLOOR4_8") + name8("CEIL3_5") + struct.pack("<hhh", 160, 0, 0)
-            for f, c in sectors
+            struct.pack("<hh", rec[0], rec[1])
+            + name8(rec[2] if len(rec) > 2 else "FLOOR4_8")
+            + name8(rec[3] if len(rec) > 3 else "CEIL3_5")
+            + struct.pack("<hhh", rec[4] if len(rec) > 4 else 160, 0, 0)
+            for rec in sectors
         )),
     ]
 
