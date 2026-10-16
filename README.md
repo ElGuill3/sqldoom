@@ -5,8 +5,8 @@ Doom running inside [DuckDB](https://duckdb.org), built from scratch, one part a
 | Part | Goal | Status |
 |------|------|--------|
 | 1 | Import a WAD file into relational tables | done |
-| 2 | Draw a top-down map with SQL | next |
-| 3 | Render walls in BSP order | planned |
+| 2 | Draw a top-down map with SQL | done |
+| 3 | Render walls in BSP order | next |
 | 4 | Floors/ceilings, sprites, game logic | planned |
 
 ## Setup
@@ -106,11 +106,68 @@ DuckDB is columnar, so per-row inserts are its worst case. On doom1.wad (~40k ma
 `executemany` took ~80 s, and binding whole Python lists as `UNNEST` parameters still took ~28 s. Writing a temporary
 CSV and running `COPY` (DuckDB's native, vectorized reader) takes about a second end to end.
 
+## Part 2: the automap, rendered by SQL
+
+![E1M1 automap rendered by SQL](docs/e1m1.png)
+
+```sh
+uv run sqldoom-automap doom1.duckdb E1M1               # ASCII art in the terminal (120x60)
+uv run sqldoom-automap doom1.duckdb E1M1 -o e1m1.png   # PNG image (640x400)
+uv run sqldoom-automap doom1.duckdb e1m6 --size 200x90 # map names are case-insensitive
+```
+
+```
+usage: sqldoom-automap [-h] [--size WxH] [-o OUTPUT] database map
+```
+
+- `--size WxH`: characters for ASCII, pixels for PNG. Both values must be at least 8.
+- `-o OUTPUT`: write a PNG instead of printing ASCII. Prints `wrote <path> (WxH)`.
+
+Errors exit with code 1 and leave no output file: `error: file not found: <path>` and
+`error: map not found: <MAP>`. An invalid `--size` is a usage error (exit code 2).
+
+| Line kind | Rule | ASCII | PNG |
+|-----------|------|-------|-----|
+| Wall | one-sided linedef | `#` | red |
+| Floor step | two-sided, floor heights differ | `+` | brown |
+| Ceiling step | two-sided, only ceiling heights differ | `=` | yellow |
+| Plain | two-sided, same heights | `.` | gray |
+| Player 1 start | thing type 1 | `@` | green cross |
+
+When two kinds land on the same pixel, the one higher in the table wins.
+
+### How SQL draws it
+
+The renderer is `src/sqldoom/sql/automap.sql`: DuckDB `TEMP` table macros that Python loads and calls. Python never
+touches a pixel. It only prints the text SQL returns, or wraps the RGB bytes SQL returns in a PNG.
+
+1. **Fit**: the map's bounding box and a single `scale` fit the map into the screen with a 1-pixel margin, keeping
+   proportions. World y grows upwards and screen y grows downwards, so the formula uses `max_y - y`. Terminal cells
+   are about twice as tall as they are wide, so ASCII mode uses a pixel `aspect` of 2.
+2. **Classify**: each linedef is joined to its sidedefs and sectors to get its kind.
+3. **Rasterize**: SQL has no loops, but `LATERAL generate_series(0, n)` fans each line out into one row per
+   pixel. This is the DDA algorithm: `n = max(|dx|, |dy|)` steps, each one rounded to a pixel.
+4. **Resolve**: `GROUP BY x, y` with `arg_min(kind, priority)` keeps one kind per pixel.
+5. **Fill**: the full `width x height` grid comes from a cross join of two `generate_series`. A `LEFT JOIN` leaves
+   empty pixels as background.
+6. **Encode**: `string_agg(... ORDER BY y, x)` serializes the grid, as characters for ASCII or as hex RGB that
+   `unhex()` turns into a single BLOB of `width * height * 3` bytes.
+
+You can call the macros yourself. In the `duckdb` CLI, load the file with `.read`; from Python, use
+`con.execute(open("src/sqldoom/sql/automap.sql").read())`.
+
+```sql
+.read src/sqldoom/sql/automap.sql
+SELECT kind, count(*) FROM automap_pixels('E1M1', 640, 400, 1.0) GROUP BY kind;
+SELECT text FROM automap_ascii('E1M1', 100, 45);
+```
+
 ## Tests
 
 ```sh
 uv run pytest
 ```
 
-Unit tests build tiny WADs byte by byte (`tests/wadbuilder.py`). `tests/test_doom1_wad.py` checks record counts and
+Unit tests build tiny WADs byte by byte (`tests/wadbuilder.py`). The automap tests use a 180x160 room whose scale
+works out exactly, so they compare the full ASCII output and decode the PNG to check individual pixels. `tests/test_doom1_wad.py` checks record counts and
 cross-references on the real WAD. It is skipped when `wad/doom1.wad` is missing; set `SQLDOOM_WAD` to use another path.
