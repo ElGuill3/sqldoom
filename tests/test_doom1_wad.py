@@ -89,6 +89,38 @@ def test_point_sector_at_the_player_start(db):
     assert query(db, "SELECT floor_height, ceiling_height FROM sectors WHERE map = 'E1M1' AND id = 38") == [(0, 72)]
 
 
+def test_point_sector_matches_a_python_d5_walk_on_every_map_and_vertex(db):
+    """The optimized point_sector (no recursive CTE) must return exactly what the D5
+    node walk returns. For every map, sample every vertex (some lie exactly on node
+    split lines, exercising the strict-`<` tie rule), the same vertices offset by
+    (+1, +1), and the player start; the SQL macro is checked against an independent
+    plain-Python walk of the nodes table (tests/test_render_perf.py)."""
+    from test_render_perf import reference_walk
+
+    for (map_name,) in query(db, "SELECT name FROM maps ORDER BY name"):
+        vertexes = query(db, f"SELECT x, y FROM vertexes WHERE map = '{map_name}' ORDER BY id")
+        points = [tuple(v) for v in vertexes]
+        points += [(x + 1, y + 1) for x, y in vertexes]
+        player = query(
+            db,
+            f"SELECT x, y FROM things WHERE map = '{map_name}' AND type = 1 ORDER BY id LIMIT 1",
+        )
+        points += [tuple(p) for p in player]
+        values = ", ".join(f"({i}, {px}, {py})" for i, (px, py) in enumerate(points))
+        got = {
+            points[i]: sector
+            for i, sector in render_query(
+                db,
+                f"SELECT p.i, ps.sector FROM (VALUES {values}) p(i, px, py), "
+                f"LATERAL point_sector('{map_name}', p.px, p.py) ps",
+            )
+        }
+        assert len(got) == len(points)
+        sector_at = reference_walk(db, map_name)
+        for point in points:
+            assert got[point] == sector_at(*point), (map_name, point)
+
+
 # Golden fingerprints of real automap output. A refactor of the screen transform once moved
 # single pixels here (floating point rounding at .5 boundaries); these pin the exact output.
 def test_automap_ascii_output_is_stable(db):
