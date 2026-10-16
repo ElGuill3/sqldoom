@@ -6,8 +6,9 @@ Doom running inside [DuckDB](https://duckdb.org), built from scratch, one part a
 |------|------|--------|
 | 1 | Import a WAD file into relational tables | done |
 | 2 | Draw a top-down map with SQL | done |
-| 3 | First-person view (flat colors) + terminal viewer | done |
-| 4 | Textures, palette, sprites | next |
+| 3 | First-person view + terminal viewer | done |
+| 4a | Doom's palette, lighting, wall textures, flats, sky | done |
+| 4b | Sprites: monsters, items, decorations | next |
 | 5 | Game logic: collisions, doors, enemies | planned |
 
 ## Setup
@@ -200,17 +201,17 @@ usage: sqldoom-view [-h] [--size COLSxROWS] [--pos X,Y] [--angle DEG] database m
 - Errors are the automap ones, plus `error: map has no player start: <MAP>` and
   `error: sqldoom-view needs an interactive terminal`.
 
-Walls, floors and ceilings have flat colors derived from their texture names, shaded by sector light and, for walls,
-by distance. Real textures come in Part 4.
+Walls, floors, ceilings and the sky use Doom's own textures and lighting (Part 4a below). Databases imported before
+Part 4a have no textures; the renderer then stops with `error: database has no textures: re-run sqldoom-import --force`.
 
 ### How SQL renders a frame
 
 Everything is in `src/sqldoom/sql/render.sql`. Python reads keys, keeps the camera position and writes the text that
 SQL returns.
 
-1. **Where am I?** `point_sector` walks the BSP tree from the root with a recursive CTE. Each node is a split line;
-   one cross product decides front or back until a subsector, which gives the camera's sector and so its eye height
-   (floor + 41, as in Doom).
+1. **Where am I?** `point_sector` finds the camera's subsector in the BSP tree, and so its sector and eye height
+   (floor + 41, as in Doom). Each node is a split line and one cross product decides front or back; the paths from
+   the root are precomputed once (see Performance).
 2. **Cast one ray per column.** Column `c` gets the direction `forward + u * right`, with `u` from -1 to 1 for a
    90 degree field of view. The direction is not normalized on purpose: the ray parameter `t` is then already the
    perpendicular depth, so there is no fisheye correction to do.
@@ -223,7 +224,7 @@ SQL returns.
    still visible for each hit. That is how steps, windows and ledges hide what is behind them. The first one-sided
    wall closes the column.
 6. **Fill spans.** Each hit paints its sector's ceiling above its walls and its floor below them, inside its window.
-   `generate_series` turns the spans into pixels.
+   `generate_series` turns the spans into pixels, and each pixel gets its texel and light (Part 4a).
 7. **Encode.** `render_rgb` returns RGB bytes for PNG. `render_ansi` packs two pixel rows into one text row with
    `▀` (foreground = top pixel, background = bottom pixel). `lag()` emits a 24-bit color code only when the color
    changes from the previous cell.
@@ -239,14 +240,52 @@ The first version needed ~80 ms per frame. A per-CTE profile (cut the CTE chain 
 
 - answers "which sector am I in?" from precomputed BSP paths: each subsector is the intersection of the half-planes on
   its path from the root, so the lookup is a `GROUP BY subsector HAVING bool_and(test)` instead of a recursive walk;
-- keeps line geometry, both sides' sector data and the texture colors in `TEMP` tables built once per connection
-  (the database schema is unchanged);
+- keeps line geometry, both sides' sector data and the lit palette in `TEMP` tables built once per connection;
 - drops walls entirely behind the camera before the column x wall cross join. This is exact: if both endpoints are
   closer than the near plane, no ray can hit the wall;
 - resolves pixels and terminal cells with aggregates instead of window functions.
 
-Measured side by side on the same busy machine, the speedup is ~2.6x for terminal frames and ~1.9x for 320x200 PNGs,
-and every frame is byte-identical to the first version (golden hashes and differential checks).
+Measured side by side on the same busy machine, the speedup was ~2.6x for terminal frames and ~1.9x for 320x200 PNGs,
+with every frame byte-identical to the first version (golden hashes and differential checks).
+
+## Part 4a: Doom's palette, lighting and textures
+
+Re-import your database first: `uv run sqldoom-import wad/doom1.wad doom1.duckdb --force`. Then the same commands
+(`sqldoom-view`, `sqldoom-render`) show the real game graphics.
+
+### What the importer adds
+
+- `palette`: PLAYPAL's first palette, 256 RGB colors. Every pixel in Doom is an index into it.
+- `colormaps`: COLORMAP's 34 tables of 256 entries. Table 0 is full bright and 31 is nearly black; lighting is
+  "replace each palette index by a darker one", which is how a 1993 game did shading without arithmetic per pixel.
+- `textures` and `texture_columns`: wall textures are not stored as images. TEXTURE1 describes each one as patches
+  (PNAMES) placed at offsets, and each patch is a column-oriented picture made of "posts" (vertical runs of pixels).
+  The importer composes them once and stores each texture column as a list of palette indices.
+- `flats`: floor and ceiling textures, 64x64 raw palette indices, between `F_START` and `F_END`.
+
+The shareware PNAMES names 187 patches that only exist in the registered game. No shareware texture uses them, so the
+importer only checks the patches a texture actually draws.
+
+### How a pixel gets its color
+
+- **Walls**: the horizontal texel is the distance along the linedef from its start (from its end when you see the
+  back side) plus the sidedef's x offset. The vertical texel comes from the world height of the pixel row and Doom's
+  pegging rules: by default an upper texture is anchored at its bottom edge (the lower ceiling) and a lower texture
+  at its top edge (the top of the step), and the linedef flags "upper unpegged" (8) and "lower unpegged" (16) change the anchor, which is how door frames
+  and windows line up in the original maps.
+- **Floors and ceilings**: for each pixel row the depth of the plane is `(h - eye) * f / (height/2 - y - 0.5)`, which
+  gives a world point per pixel; its coordinates modulo 64 pick the flat texel.
+- **Sky**: `F_SKY1` ceilings show `SKY1` by ray angle (four repeats per turn, as in Doom), always full bright.
+- **Light**: as in Doom, the sector light picks a starting colormap, walls get darker with distance
+  (`2560 / t` steps) and flats with depth, and perfectly horizontal or vertical walls are one step darker or
+  brighter (Doom's "fake contrast"). The final color is `palette[colormaps[level][texel]]`, precomputed as one lookup
+  table per light level.
+
+### Cost
+
+Textures moved a default terminal frame of E1M1 from ~39 ms to ~48-50 ms on this machine, about 20 fps. The frame
+text grew from ~44 KB to ~148 KB, because textured cells change color almost every cell and the ANSI encoder can no
+longer skip codes. Both are the next optimization targets.
 
 ## Tests
 

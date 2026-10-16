@@ -10,9 +10,9 @@ COLORMAP lighting, composite wall textures, flats and the sky. Sprites are Part 
 
 ## Tasks
 
-- T1 [S2] Importer: palette, colormaps, composite wall textures, flats as new tables (G1-G3). route: worker. commit: pending
-- T2 [S2] Renderer: textured walls (G4), flats (G5), sky (G6), Doom lighting (G7); measure each step. route: worker. commit: pending
-- T3 [S1,S2] README Part 4a, timings, refreshed golden hashes and screenshots. route: inline. commit: pending
+- T1 [S2] Importer: palette, colormaps, composite wall textures, flats as new tables (G1-G3). route: worker. commit: 8580176 [done]
+- T2 [S2] Renderer: textured walls (G4), flats (G5), sky (G6), Doom lighting (G7); measure each step. route: worker. commit: 9e29baa [done]
+- T3 [S1,S2] README Part 4a, timings, refreshed golden hashes and screenshots. route: inline. commit: (this commit, see git log) [done]
 
 ## Log
 
