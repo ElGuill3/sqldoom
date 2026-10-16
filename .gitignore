@@ -12,3 +12,6 @@ wad/
 
 # Agent harness cache.
 .atl/
+
+# Images rendered by the README examples into the project root.
+/*.png
