@@ -5,30 +5,15 @@ loads them, runs one query, and prints the text or wraps the RGB bytes it return
 """
 
 import argparse
-import re
 import sys
 from importlib.resources import files
 from pathlib import Path
 
-import duckdb
-
+from .common import MIN_SIZE, MAX_SIZE, fail, open_map, parse_size
 from .png import encode_rgb
 
 ASCII_SIZE = (120, 60)
 PNG_SIZE = (640, 400)
-MIN_SIZE, MAX_SIZE = 8, 4096
-
-
-def parse_size(value: str) -> tuple[int, int]:
-    match = re.fullmatch(r"(\d+)x(\d+)", value)
-    if not match or not (MIN_SIZE <= int(match[1]) <= MAX_SIZE and MIN_SIZE <= int(match[2]) <= MAX_SIZE):
-        raise argparse.ArgumentTypeError(f"expected WIDTHxHEIGHT, both between 8 and 4096, got '{value}'")
-    return int(match[1]), int(match[2])
-
-
-def fail(message: str) -> int:
-    print(f"error: {message}", file=sys.stderr)
-    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -47,18 +32,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     map_name = args.map.upper()
 
-    if not args.database.is_file():
-        return fail(f"file not found: {args.database}")
-
-    # Only opening the file and finding the maps table can mean "wrong database"; errors past
-    # that point are renderer bugs and must surface as such, not as a misleading message.
-    try:
-        con = duckdb.connect(str(args.database), read_only=True)
-        map_found = con.execute("SELECT 1 FROM maps WHERE name = ?", [map_name]).fetchone()
-    except duckdb.Error:
-        if "con" in locals():
-            con.close()
-        return fail(f"not a sqldoom database: {args.database}")
+    opened = open_map(args.database, map_name)
+    if opened is None:
+        return 1
+    con, map_found = opened
 
     with con:
         if not map_found:
