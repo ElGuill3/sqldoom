@@ -12,9 +12,9 @@ Later parts (top-down map, BSP wall render, floors/sprites/logic) get their own 
 
 ## Tasks
 
-- T1 [S2,S4] project scaffold (uv, duckdb, pytest) + WAD header/directory parser -> `lumps` table. route: inline. commit: see git log
-- T2 [S4] map lumps of every map -> 8 relational tables with NULL for "no reference". route: inline. commit: see git log
-- T3 [S3,S4] CLI `sqldoom-import`, error handling, README walkthrough, integrity queries against doom1.wad. route: inline. commit: see git log
+- T1 [S2,S4] project scaffold (uv, duckdb, pytest) + WAD header/directory parser -> `lumps` table. route: inline. commit: 27464c6 [done]
+- T2 [S4] map lumps of every map -> 8 relational tables with NULL for "no reference". route: inline. commit: 09e2515 [done]
+- T3 [S3,S4] CLI `sqldoom-import`, error handling, README walkthrough, integrity queries against doom1.wad. route: inline. commit: (this commit, see git log) [done]
 
 ## Log
 
@@ -23,3 +23,5 @@ Later parts (top-down map, BSP wall render, floors/sprites/logic) get their own 
 - L3: "mejor arrancar desde 0, la propuesta con duckDB me parece razonable para expermientacion"
 - L4: "vamos por partes, pero tu implementas y vas explicando"
 - L5: Decisions: parse binary in Python (`struct`), store as-is in DuckDB; Python 3.12 (duckdb wheels); doom1.wad shareware from the Debian package, kept in gitignored `wad/`; refuse to overwrite an existing database unless `--force`.
+- L6: Evidence: row-wise executemany loaded doom1.wad in ~84 s; list-bound UNNEST ~28 s; CSV + COPY 1.4 s. Map tables use CSV + COPY, lumps (BLOBs) use UNNEST.
+- L7: Evidence: doom1.wad imports 1264 lumps / 9 maps; E1M1 has 467 vertexes, 475 linedefs, 648 sidedefs, 85 sectors, 732 segs, 237 ssectors, 236 nodes, 138 things; all cross-reference checks are empty.
