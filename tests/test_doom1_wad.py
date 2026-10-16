@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import query, render_query, run_automap, run_import
+from conftest import query, render_query, run_automap, run_import, run_module
 
 WAD = Path(os.environ.get("SQLDOOM_WAD", Path(__file__).parent.parent / "wad" / "doom1.wad"))
 
@@ -108,4 +108,24 @@ def test_automap_png_output_is_stable(db, tmp_path):
     assert result.returncode == 0
     assert hashlib.sha256(out.read_bytes()).hexdigest() == (
         "afce18bbcf4343affb0d14ab6d2d33f01eba0daed9c8413f97f8d210ad55be27"
+    )
+
+
+def test_first_person_png_output_is_stable(db, tmp_path):
+    out = tmp_path / "view.png"
+
+    result = run_module("sqldoom.render", db, "E1M1", "-o", out)
+
+    assert result.returncode == 0
+    assert hashlib.sha256(out.read_bytes()).hexdigest() == (
+        "a977bf34502b434c6f7a4d828c9be84318117a3f7692f1656c1f01f1a46b184f"
+    )
+
+
+def test_first_person_terminal_output_is_stable(db):
+    result = run_module("sqldoom.render", db, "E1M1", "--size", "80x25", text=False)
+
+    assert result.returncode == 0
+    assert hashlib.sha256(result.stdout).hexdigest() == (
+        "a003735cb6e4b58671544395b98b338b31ece3e5428b85c3c33ebcbc13d278fa"
     )

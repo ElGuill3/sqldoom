@@ -12,10 +12,10 @@ shown in the terminal with truecolor half-blocks, plus a walk-around viewer. Tex
 
 ## Tasks
 
-- T1 [S1] `point_sector` macro: find the camera's sector by walking the BSP tree with a recursive CTE. route: worker A. commit: pending
-- T2 [S1,S2] `render_pixels`/`render_rgb` macros (Design D1-D7) + `sqldoom-render` PNG output. route: worker A. commit: pending
-- T3 [S2,S3,S4] `render_ansi` macro (D8) + `sqldoom-render` terminal output + `sqldoom-view` interactive viewer (D9). route: worker B. commit: pending
-- T4 [S1] README Part 3 section, frame-time numbers, golden hashes. route: inline. commit: pending
+- T1 [S1] `point_sector` macro: find the camera's sector by walking the BSP tree with a recursive CTE. route: worker A. commit: 574fb0e (+ refactor ad84376) [done]
+- T2 [S1,S2] `render_pixels`/`render_rgb` macros (Design D1-D7) + `sqldoom-render` PNG output. route: worker A. commit: 574fb0e [done]
+- T3 [S2,S3,S4] `render_ansi` macro (D8) + `sqldoom-render` terminal output + `sqldoom-view` interactive viewer (D9). route: worker B. commit: 5b58674 [done]
+- T4 [S1] README Part 3 section, frame-time numbers, golden hashes. route: inline. commit: (this commit, see git log) [done]
 
 ## Log
 
@@ -32,3 +32,4 @@ shown in the terminal with truecolor half-blocks, plus a walk-around viewer. Tex
   - D7 Colors (flat until Part 4 textures): base RGB from the texture name: `md5(name)` hex bytes 1-3, each mapped to `64 + byte % 160`. Wall texture = middle (solid), upper, lower of the near-side sidedef; NULL texture -> name `-`. `F_SKY1` ceilings are `(100, 150, 220)`, unshaded. Walls are shaded by `light_level / 255 * greatest(0.35, 1 - t / 1600)`, flats by `light_level / 255` only; channels rounded and clamped to 0..255.
   - D8 Terminal frame: two pixel rows per text row with `▀` (foreground = top pixel, background = bottom pixel), 24-bit SGR codes `ESC[38;2;R;G;Bm` / `ESC[48;2;R;G;Bm`, emitted only when the color changes from the previous cell in the row (`lag()`), `ESC[0m` and `\n` at the end of each row. For terminal output `--size` is in characters (pixels = cols x rows*2); for PNG it is in pixels.
   - D9 Viewer: Python owns only I/O and the camera (Part 5 moves player state into SQL): raw terminal (termios/tty, stdlib only), alternate screen, hidden cursor, synchronized output, always restored on exit or error. Keys: `w`/Up forward 16 units, `s`/Down back 16, `a`/Left turn left 7.5 deg, `d`/Right turn right 7.5 deg, `q`/Esc quit. No collisions (noclip). Status line with map, x, y, angle, fps and key help.
+- L5: Evidence: E1M1 from the player start renders in ~110 ms at 160x100 (8.9 fps viewer at 160x50 chars, ~44 KB per terminal frame) and ~160 ms at 320x200. Golden sha256 tests pin the E1M1 PNG and the 80x25 terminal frame. Worker decision on D9: raw input only (OPOST/ONLCR kept) so the bare `\n` row terminators return to column 1.

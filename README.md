@@ -6,8 +6,9 @@ Doom running inside [DuckDB](https://duckdb.org), built from scratch, one part a
 |------|------|--------|
 | 1 | Import a WAD file into relational tables | done |
 | 2 | Draw a top-down map with SQL | done |
-| 3 | Render walls in BSP order | next |
-| 4 | Floors/ceilings, sprites, game logic | planned |
+| 3 | First-person view (flat colors) + terminal viewer | done |
+| 4 | Textures, palette, sprites | next |
+| 5 | Game logic: collisions, doors, enemies | planned |
 
 ## Setup
 
@@ -162,6 +163,66 @@ You can call the macros yourself. In the `duckdb` CLI, load the file with `.read
 SELECT kind, count(*) FROM automap_pixels('E1M1', 640, 400, 1.0) GROUP BY kind;
 SELECT text FROM automap_ascii('E1M1', 100, 45);
 ```
+
+## Part 3: the first-person view, in your terminal
+
+![E1M1 from the player start](docs/e1m1_view.png) ![E1M1 looking out of a window](docs/e1m1_view_window.png)
+
+```sh
+uv run sqldoom-view doom1.duckdb E1M1                                  # walk around (noclip)
+uv run sqldoom-render doom1.duckdb E1M1                                # print one frame (160x50 characters)
+uv run sqldoom-render doom1.duckdb E1M1 -o view.png                    # PNG (320x200 pixels)
+uv run sqldoom-render doom1.duckdb E1M1 --pos 1056,-3200 --angle 45 -o window.png
+```
+
+The viewer needs a terminal with 24-bit color, such as WezTerm or Windows Terminal. Keys: `w`/`s` or Up/Down move
+16 units, `a`/`d` or Left/Right turn 7.5 degrees, `q`/Esc quits. There are no collisions yet (Part 5), so you can
+walk through walls. The status line shows the position, angle and frames per second.
+
+```
+usage: sqldoom-render [-h] [--size WxH] [--pos X,Y] [--angle DEG] [-o OUTPUT] database map
+usage: sqldoom-view [-h] [--size COLSxROWS] [--pos X,Y] [--angle DEG] database map
+```
+
+- Without `--pos`/`--angle` the camera is the player 1 start.
+- `--size` counts characters for terminal output (one character = 2 pixels stacked) and pixels for PNG. Both values
+  must be between 8 and 4096. The viewer defaults to the terminal size.
+- Errors are the automap ones, plus `error: map has no player start: <MAP>` and
+  `error: sqldoom-view needs an interactive terminal`.
+
+Walls, floors and ceilings have flat colors derived from their texture names, shaded by sector light and, for walls,
+by distance. Real textures come in Part 4.
+
+### How SQL renders a frame
+
+Everything is in `src/sqldoom/sql/render.sql`. Python reads keys, keeps the camera position and writes the text that
+SQL returns.
+
+1. **Where am I?** `point_sector` walks the BSP tree from the root with a recursive CTE. Each node is a split line;
+   one cross product decides front or back until a subsector, which gives the camera's sector and so its eye height
+   (floor + 41, as in Doom).
+2. **Cast one ray per column.** Column `c` gets the direction `forward + u * right`, with `u` from -1 to 1 for a
+   90 degree field of view. The direction is not normalized on purpose: the ray parameter `t` is then already the
+   perpendicular depth, so there is no fisheye correction to do.
+3. **Hit every wall at once.** A cross join of columns x linedefs, solved with 2D cross products, gives every
+   ray/wall intersection: about 76,000 candidate pairs on E1M1 at 160 columns. Doom needed the BSP tree to draw front to
+   back because sorting was too slow on a 486. In SQL, `ORDER BY t` per column is cheap.
+4. **Project.** A height `z` at depth `t` lands on screen row `height/2 - (z - eye) * f / t`.
+5. **Clip with window functions.** Walking each column front to back, every two-sided wall leaves an opening
+   (between the lower ceiling and the higher floor). `max`/`min` over the preceding rows give the part of the column
+   still visible for each hit. That is how steps, windows and ledges hide what is behind them. The first one-sided
+   wall closes the column.
+6. **Fill spans.** Each hit paints its sector's ceiling above its walls and its floor below them, inside its window.
+   `generate_series` turns the spans into pixels.
+7. **Encode.** `render_rgb` returns RGB bytes for PNG. `render_ansi` packs two pixel rows into one text row with
+   `▀` (foreground = top pixel, background = bottom pixel). `lag()` emits a 24-bit color code only when the color
+   changes from the previous cell.
+
+### Performance
+
+Measured in WSL2 on the development machine, E1M1 from the player start renders in ~110 ms at 160x100 pixels (the default terminal frame,
+about 9 fps) and ~160 ms at 320x200. A terminal frame is about 44 KB of text. Part 4 will need to find speed before it
+adds textures.
 
 ## Tests
 
