@@ -95,6 +95,79 @@ def room_map_lumps(marker: str = "E1M1", right_floor: int = 0, right_ceiling: in
     )
 
 
+# Part 4a: graphics lumps. PLAYPAL is 768 bytes per palette (doom1.wad carries several
+# back to back; the importer uses palette 0 only). COLORMAP is 34 levels of 256 entries.
+
+
+def playpal(palettes: list[list[tuple[int, int]]] | None = None) -> bytes:
+    """PLAYPAL: one or more 256-entry palettes; entry i defaults to (i, 255-i, i//2)."""
+    if palettes is None:
+        palettes = [[(i, 255 - i, i // 2) for i in range(256)]]
+    return bytes(b for pal in palettes for rgb in pal for b in rgb)
+
+
+def colormap(levels: list[list[int]] | None = None) -> bytes:
+    """COLORMAP: 34 lighting levels; level k defaults to entry c shifted by k."""
+    if levels is None:
+        levels = [[(c + k) % 256 for c in range(256)] for k in range(34)]
+    return bytes(b for level in levels for b in level)
+
+
+def picture(width: int, height: int, columns: dict[int, list[tuple[int, list[int]]]],
+            leftoffset: int = 0, topoffset: int = 0) -> bytes:
+    """A picture-format patch (wall texture or sprite): header, per-column offsets, then
+    each column as posts of (topdelta, length, pad, pixels, pad), 0xFF ending the column.
+    columns maps u to a list of (topdelta, pixels) posts; a column with no posts is
+    transparent (still gets an offset, unlike some real WADs that reuse the previous)."""
+    header = struct.pack("<4h", width, height, leftoffset, topoffset)
+    offsets: list[int] = []
+    blobs: list[bytes] = []
+    pos = PICTURE_HEADER_SIZE + 4 * width
+    for u in range(width):
+        offsets.append(pos)
+        blob = b""
+        for topdelta, pixels in columns.get(u, []):
+            blob += struct.pack("<2B", topdelta, len(pixels)) + b"\0" + bytes(pixels) + b"\0"
+        blob += b"\xff"
+        blobs.append(blob)
+        pos += len(blob)
+    return header + b"".join(struct.pack("<i", o) for o in offsets) + b"".join(blobs)
+
+
+PICTURE_HEADER_SIZE = 8  # int16 width, height, leftoffset, topoffset
+
+
+def pnames(names: list[str]) -> bytes:
+    """PNAMES: int32 count, then 8-char patch lump names."""
+    return struct.pack("<i", len(names)) + b"".join(name8(n) for n in names)
+
+
+def texture_defs(entries: list[tuple[str, int, int, list[tuple[int, int, int]]]]) -> bytes:
+    """A TEXTURE1/TEXTURE2 lump. Each entry is (name, width, height, patches) with
+    patches as (originx, originy, PNAMES index); masked/obsolete/stepdir/colormap are 0."""
+    offsets: list[int] = []
+    blobs: list[bytes] = []
+    pos = 4 + 4 * len(entries)
+    for name, width, height, patches in entries:
+        offsets.append(pos)
+        blob = (name8(name) + struct.pack("<IhhIh", 0, width, height, 0, len(patches))
+                + b"".join(struct.pack("<5h", ox, oy, p, 0, 0) for ox, oy, p in patches))
+        blobs.append(blob)
+        pos += len(blob)
+    return struct.pack("<i", len(entries)) + b"".join(struct.pack("<i", o) for o in offsets) + b"".join(blobs)
+
+
+FLAT_SIZE = 4096  # a flat is a 64x64 lump, one byte per texel, row-major
+
+
+def flat(overrides: dict[int, int] | None = None) -> bytes:
+    """A 4096-byte flat; overrides map a row-major texel index to a value."""
+    data = bytearray(FLAT_SIZE)
+    for i, v in (overrides or {}).items():
+        data[i] = v
+    return bytes(data)
+
+
 def sample_map_lumps(marker: str = "E1M1") -> list[tuple[str, bytes]]:
     """One small map: a square room split by one BSP node into two subsectors."""
     things = struct.pack("<5h", 64, 96, 90, 1, 7) + struct.pack("<5h", -32, 16, 270, 3004, 4)

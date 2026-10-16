@@ -8,6 +8,7 @@ from pathlib import Path
 import duckdb
 
 from . import db
+from .graphics import decode_graphics
 from .maps import decode_map
 from .wad import CorruptWad, NotAWad, find_maps, read_lumps
 
@@ -36,6 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         lumps = read_lumps(args.wad.read_bytes())
         maps = [decode_map(lumps, marker) for marker in find_maps(lumps)]
+        graphics = decode_graphics(lumps)
     except NotAWad:
         return fail(f"not a WAD file: {args.wad}")
     except CorruptWad:
@@ -46,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     scratch.unlink(missing_ok=True)
     try:
         with duckdb.connect(str(scratch)) as con:
-            db.load(con, lumps, maps)
+            db.load(con, lumps, maps, graphics)
         os.replace(scratch, args.database)
     finally:
         scratch.unlink(missing_ok=True)

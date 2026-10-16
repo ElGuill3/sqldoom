@@ -50,7 +50,7 @@ Errors go to stderr and exit with code 1:
 |---------|-------|
 | `error: file not found: <path>` | The WAD path does not exist. |
 | `error: not a WAD file: <path>` | The file does not start with `IWAD`/`PWAD`. |
-| `error: corrupt WAD file: <path>` | The directory or a map lump points outside the file, or a lump has a partial record. |
+| `error: corrupt WAD file: <path>` | The directory or a lump points outside the file, a lump has a partial record, or the graphics data is malformed (bad texture/patch offsets, a PNAMES name with no lump, a non-4096-byte lump between F_START and F_END). |
 | `error: database already exists: <path> (use --force to replace)` | The output exists and `--force` was not given. |
 
 The import fails before it writes anything. With `--force`, the new database is built in a scratch file and swapped
@@ -79,6 +79,11 @@ Every map table is keyed by `(map, id)`, where `id` is the record's index in its
 | `segs` | piece of a linedef produced by the BSP builder | `v1`, `v2`, `angle` (0..65535), `linedef`, `direction` |
 | `ssectors` | convex subsector (BSP leaf) | `first_seg`, `seg_count` |
 | `nodes` | BSP split line | partition `x, y, dx, dy`, bounding boxes, `right_child`/`left_child` + `*_is_ssector` |
+| `palette` | PLAYPAL color (palette 0) | `idx`, `r`, `g`, `b` |
+| `colormaps` | lighting level 0..33 (0 = full bright) | `colors` (256 palette indices) |
+| `textures` | composite wall texture | `width`, `height` |
+| `texture_columns` | texture column `u`, `pixels` being its palette indices (one per texel row) | `u`, `pixels` |
+| `flats` | floor/ceiling texture (64x64) | `pixels` (palette indices, row-major) |
 
 ### Exploring it
 
@@ -105,7 +110,9 @@ SELECT x, y, angle FROM things WHERE map = 'E1M1' AND type = 1;
 
 DuckDB is columnar, so per-row inserts are its worst case. On doom1.wad (~40k map records), row-by-row
 `executemany` took ~80 s, and binding whole Python lists as `UNNEST` parameters still took ~28 s. Writing a temporary
-CSV and running `COPY` (DuckDB's native, vectorized reader) takes about a second end to end.
+CSV and running `COPY` (DuckDB's native, vectorized reader) takes about a second end to end. List columns (`UTINYINT[]`)
+are worse still — UNNEST binding converts nested Python lists one value at a time (~155 s for the ~1M texture texels,
+and superlinearly) — so the graphics tables also go through CSV, with each list serialized as a literal like `[1,2,3]`.
 
 ## Part 2: the automap, rendered by SQL
 

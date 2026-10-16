@@ -3,6 +3,10 @@
 Loading speed matters because DuckDB is columnar: per-row inserts are its worst
 case. Measured on doom1.wad (~40k map records): row-by-row executemany ~80 s,
 binding whole Python lists as UNNEST parameters ~28 s, CSV + COPY well under 1 s.
+List (UTINYINT[]) columns are worse still: UNNEST binding converts nested Python
+lists one value at a time (~155 s for doom1.wad's ~1M texture texels, and it
+grows superlinearly), so those tables also go through CSV, with each list
+serialized as a DuckDB literal like "[1,2,3]".
 """
 
 import csv
@@ -11,6 +15,7 @@ import tempfile
 
 import duckdb
 
+from .graphics import Graphics
 from .maps import FORMATS, MapData
 from .wad import Lump
 
@@ -27,6 +32,36 @@ CREATE TABLE maps (
     name     VARCHAR PRIMARY KEY,  -- marker lump name: E1M1, MAP01, ...
     lump_idx INTEGER NOT NULL REFERENCES lumps (idx)
 );
+
+CREATE TABLE palette (
+    idx INTEGER PRIMARY KEY,  -- palette entry 0..255 (PLAYPAL palette 0)
+    r   INTEGER NOT NULL,
+    g   INTEGER NOT NULL,
+    b   INTEGER NOT NULL
+);
+
+CREATE TABLE colormaps (
+    level  INTEGER PRIMARY KEY,  -- lighting level 0..33 (0 = full bright)
+    colors UTINYINT[256] NOT NULL  -- palette index per texel
+);
+
+CREATE TABLE textures (
+    name   VARCHAR PRIMARY KEY,
+    width  INTEGER NOT NULL,
+    height INTEGER NOT NULL
+);
+
+CREATE TABLE texture_columns (
+    texture VARCHAR NOT NULL REFERENCES textures (name),
+    u       INTEGER NOT NULL,  -- texel column 0..width-1
+    pixels  UTINYINT[] NOT NULL,  -- palette indices, one per texel row
+    PRIMARY KEY (texture, u)
+);
+
+CREATE TABLE flats (
+    name   VARCHAR PRIMARY KEY,
+    pixels UTINYINT[4096] NOT NULL  -- 64x64, row-major
+);
 """
 
 
@@ -40,7 +75,8 @@ def insert_columns(con: duckdb.DuckDBPyConnection, table: str, rows: list[tuple]
 
 
 def copy_rows(con: duckdb.DuckDBPyConnection, table: str, rows: list[tuple]) -> None:
-    """Bulk load through DuckDB's native CSV reader. None becomes an empty field, read as NULL."""
+    """Bulk load through DuckDB's native CSV reader. None becomes an empty field, read as NULL.
+    List-valued cells must be pre-serialized with list_literal."""
     if not rows:
         return
     fd, path = tempfile.mkstemp(suffix=".csv")
@@ -53,7 +89,13 @@ def copy_rows(con: duckdb.DuckDBPyConnection, table: str, rows: list[tuple]) -> 
         os.unlink(path)
 
 
-def load(con: duckdb.DuckDBPyConnection, lumps: list[Lump], maps: list[MapData]) -> None:
+def list_literal(values: list[int]) -> str:
+    """A Python list as DuckDB's list literal, e.g. "[1,2,3]", for COPY loading."""
+    return "[" + ",".join(map(str, values)) + "]"
+
+
+def load(con: duckdb.DuckDBPyConnection, lumps: list[Lump], maps: list[MapData],
+         graphics: Graphics) -> None:
     con.execute(SCHEMA)
     for fmt in FORMATS:
         con.execute(
@@ -65,3 +107,14 @@ def load(con: duckdb.DuckDBPyConnection, lumps: list[Lump], maps: list[MapData])
     insert_columns(con, "maps", [(m.name, m.lump_idx) for m in maps])
     for fmt in FORMATS:
         copy_rows(con, fmt.table, [row for m in maps for row in m.rows[fmt.table]])
+
+    # Graphics. The UNNEST loader is pathologically slow on UTINYINT[] columns
+    # (~200 s for doom1.wad's ~1M texels), so every list column goes through
+    # CSV + COPY like the map tables, with lists as DuckDB literals.
+    insert_columns(con, "palette", [(i, r, g, b) for i, (r, g, b) in enumerate(graphics.palette)])
+    copy_rows(con, "colormaps", [(k, list_literal(colors)) for k, colors in enumerate(graphics.colormaps)])
+    copy_rows(con, "textures", [(t.name, t.width, t.height) for t in graphics.textures])
+    copy_rows(con, "texture_columns", [
+        (t.name, u, list_literal(pixels)) for t in graphics.textures for u, pixels in enumerate(t.columns)
+    ])
+    copy_rows(con, "flats", [(name, list_literal(pixels)) for name, pixels in graphics.flats])

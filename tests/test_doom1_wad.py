@@ -74,6 +74,45 @@ def test_bsp_tree_has_one_more_leaf_than_nodes(db):
         WHERE s.c <> n.c + 1""") == []
 
 
+# Part 4a: graphics tables.
+
+
+def test_palette_has_256_rows(db):
+    assert query(db, "SELECT count(*) FROM palette") == [(256,)]
+
+
+def test_colormaps_has_34_levels(db):
+    assert query(db, "SELECT count(*) FROM colormaps") == [(34,)]
+
+
+def test_texture_count_matches_texture1(db):
+    assert query(db, "SELECT count(*) FROM textures") == [(125,)]
+
+
+def test_sky1_is_256x128(db):
+    assert query(db, "SELECT width, height FROM textures WHERE name = 'SKY1'") == [(256, 128)]
+
+
+def test_flats(db):
+    names = [name for (name,) in query(db, "SELECT name FROM flats ORDER BY name")]
+    assert len(names) == 54
+    for flat in ("FLOOR4_8", "CEIL3_5", "NUKAGE1", "F_SKY1"):
+        assert flat in names
+
+
+def test_every_sidedef_texture_exists(db):
+    assert query(db, """
+        SELECT s.map, s.id FROM sidedefs s
+        WHERE upper_texture IS NOT NULL AND NOT EXISTS (SELECT 1 FROM textures t WHERE t.name = s.upper_texture)
+           OR lower_texture IS NOT NULL AND NOT EXISTS (SELECT 1 FROM textures t WHERE t.name = s.lower_texture)
+           OR middle_texture IS NOT NULL AND NOT EXISTS (SELECT 1 FROM textures t WHERE t.name = s.middle_texture)
+    """) == []
+
+
+def test_texture_columns_cover_every_texture_width(db):
+    assert query(db, "SELECT sum(width) FROM textures") == query(db, "SELECT count(*) FROM texture_columns")
+
+
 @pytest.mark.parametrize("check", ORPHANS)
 def test_cross_references_resolve(db, check):
     assert query(db, ORPHANS[check]) == []
