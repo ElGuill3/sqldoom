@@ -7,62 +7,87 @@ t = 128 by all 16 columns (|u| <= 15.5/8 < 1, so the side walls at y = +/-128 ar
 reached at t >= 136.5, behind it). With eye = 0 + 41 (D5) and y(z) = 5 - (z - eye)*8/t
 (D6), the solid east wall spans cy = 5 - 31*8/128 = 3.0625 to fy = 5 + 41*8/128 = 7.5625:
 a span [a, b) covers rows ceil(a - 0.5) .. ceil(b - 0.5) - 1, so every column shows
-rows 0-2 ceiling, 3-7 wall, 8-9 floor. The step map puts a two-sided linedef at
-x = 64 (t = 64) with the far sector raised to floor 24: fy_f = 5 + 17*8/64 = 7.125,
-so the opening is [1.125, 7.125) and the second hit draws rows 1-2 ceiling, 3-5 wall
+rows 0-2 ceiling, 3-7 wall, 8-9 floor. The east wall linedef runs from (128, 128) to
+(128, -128) with the room on its front side, so G4 wall u = floor(dist) with
+dist = s * 256 = 128 + 128*u_c. The step map puts a two-sided linedef at x = 64
+t = 64) with the far sector raised to floor 24: fy_f = 5 + 17*8/64 = 7.125, so the
+opening is [1.125, 7.125) and the second hit draws rows 1-2 ceiling, 3-5 wall
 (y(24, 128) = 6.0625), 6 floor inside that window; the first hit draws row 0 ceiling
 and rows 7-9 lower.
+
+The maps carry graphics lumps built by wadbuilder.graphics_lumps: the test palette
+(palette[i] = (i, 255-i, i//2)), textures and flats with the test pattern
+texel(u, v) = (u + 4v) % 256, and by default the identity colormap, so a rendered
+pixel shows palette[texel] directly (G7 lighting is tested with the revealing
+colormap in test_textures_render.py).
 """
 
 import hashlib
 import math
 
 from conftest import render_query, run_import
-from wadbuilder import map_lumps, write_wad
+from wadbuilder import flat, graphics_lumps, map_lumps, write_wad
 
 WIDTH, HEIGHT = 16, 10
 
 
-def corridor_map_lumps(step: bool = False, player_at: tuple | None = (0, 0, 0)):
-    """Corridor x in [-256, 128], y in [-128, 128]. The east wall (x = 128) is solid.
+def corridor_map_lumps(step: bool = False, player_at: tuple | None = (0, 0, 0),
+                       sky: bool = False, split_flags: int = 0, east_flags: int = 0,
+                       east_xoff: int = 0, east_yoff: int = 0, far_ceiling: int = 72,
+                       light: int = 160, uniform: bool = False, graphics: bool = True,
+                       colormap: bytes | None = None):
+    """Corridor x in [-256, 128], y in [-128, 128]. The east wall (x = 128) is solid and
+    runs from (128, 128) to (128, -128), room on its front side (G4: u runs from v1
+    southward, dist = s * 256).
 
     With step, a two-sided linedef at x = 64 splits it: west sector (floor 0,
-    ceiling 72, FLATW/CEILW), east sector (floor 24, ceiling 72, FLATE/CEILE).
-    The player 1 start sits at player_at (x, y, angle in degrees), or nowhere.
+    ceiling 72, FLATW/CEILW), east sector (floor 24, ceiling `far_ceiling`, FLATE/CEILE);
+    split_flags sets the split linedef's pegging flags (G4) and east_flags the east
+    wall's (a one-sided middle wall with flag 16 is bottom-pegged). With sky, the west
+    ceiling texture is F_SKY1 (G6). With uniform, every texture is a 1x1 texture named
+    UNIF and every flat is FLATU, so whole pixel rows repeat one color (D8
+    code-omission tests). With graphics=False the WAD carries no graphics lumps
+    (G3: importing succeeds, rendering must fail cleanly).
     """
-    vertexes = [(-256, -128), (128, -128), (128, 128), (-256, 128), (64, -128), (64, 128)]
-    sectors = [(0, 72, "FLATW", "CEILW", 160)]
+    wall = (lambda name: "UNIF") if uniform else (lambda name: name)
+    flatn = (lambda name: "FLATU") if uniform else (lambda name: name)
+    east_textures = (east_xoff, east_yoff) if east_xoff or east_yoff else ()
+    vertexes = [(128, 128), (128, -128), (-256, -128), (-256, 128), (64, -128), (64, 128)]
+    sectors = [(0, 72, flatn("FLATW"), "F_SKY1" if sky else flatn("CEILW"), light)]
     things = [(*player_at, 1)] if player_at is not None else []
-    segs, ssectors = [(0, 1, 0, 0, 0, 0)], [(1, 0)]
     if not step:
+        segs, ssectors = [(0, 1, 0, 0, 0, 0)], [(1, 0)]
         linedefs = [
-            (0, 1, 0, None),  # south wall
-            (1, 2, 1, None),  # east wall
-            (2, 3, 2, None),  # north wall
-            (3, 0, 3, None),  # west wall
+            (0, 1, 0, None, east_flags),  # east wall, v1 -> v2 pointing south
+            (1, 2, 1, None),  # south wall
+            (2, 3, 2, None),  # west wall
+            (3, 0, 3, None),  # north wall
         ]
-        sidedefs = [(0, "WALLS", "-", "-"), (0, "WALLE", "-", "-"),
-                    (0, "WALLN", "-", "-"), (0, "WALLW", "-", "-")]
+        sidedefs = [(0, wall("WALLE"), "-", "-", *east_textures),
+                    (0, wall("WALLS"), "-", "-"),
+                    (0, wall("WALLW"), "-", "-"), (0, wall("WALLN"), "-", "-")]
     else:
-        sectors.append((24, 72, "FLATE", "CEILE", 160))
-        segs.append((1, 2, 0, 2, 0, 0))  # subsector 1's first seg: the east wall
-        ssectors.append((1, 1))
+        sectors.append((24, far_ceiling, flatn("FLATE"), flatn("CEILE"), light))
+        # subsector 0's first seg: the south wall (sector 0); subsector 1's: the east
+        # wall (sector 1, front sidedef)
+        segs, ssectors = [(1, 2, 0, 1, 0, 0)], [(1, 0)]
+        segs.append((0, 1, 0, 0, 0, 0))
         linedefs = [
-            (0, 1, 0, None),  # south wall
-            (4, 5, 4, 5),  # split line: front (east) -> sector 1, back (west) -> sector 0
-            (1, 2, 6, None),  # east wall
-            (2, 3, 7, None),  # north wall
-            (3, 0, 8, None),  # west wall
+            (0, 1, 0, None, east_flags),  # east wall, front sidedef -> sector 1
+            (1, 2, 1, None),  # south wall
+            (4, 5, 2, 3, split_flags),  # split line: front (east) -> 1, back (west) -> 0
+            (2, 3, 4, None),  # west wall
+            (3, 0, 5, None),  # north wall
         ]
         sidedefs = [
-            (0, "WALLS", "-", "-"), (0, "WALLE", "-", "-"),
-            (0, "WALLN", "-", "-"), (0, "WALLW", "-", "-"),
-            (1, "-", "UPPER1", "LOWER1"),  # east side of the split (faces away)
-            (0, "-", "UPPER2", "LOWER2"),  # west side of the split: the near side
-            (1, "WALLED", "-", "-"),  # east wall, front sidedef -> sector 1
-            (0, "WALLN", "-", "-"), (0, "WALLW", "-", "-"),
+            (1, wall("WALLED"), "-", "-"),       # east wall, front sidedef -> sector 1
+            (0, wall("WALLS"), "-", "-"),        # south wall
+            (1, "-", wall("UPPER1"), wall("LOWER1")),  # east side of the split (faces away)
+            (0, "-", wall("UPPER2"), wall("LOWER2")),  # west side of the split: the near side
+            (0, wall("WALLW"), "-", "-"),        # west wall
+            (0, wall("WALLN"), "-", "-"),        # north wall
         ]
-    return map_lumps(
+    lumps = map_lumps(
         "E1M1",
         vertexes=vertexes,
         linedefs=linedefs,
@@ -72,6 +97,18 @@ def corridor_map_lumps(step: bool = False, player_at: tuple | None = (0, 0, 0)):
         segs=segs,
         ssectors=ssectors,
     )
+    if graphics:
+        if uniform:
+            # One 1x1 texture (texel 0) and one all-zero flat: one color everywhere.
+            lumps += graphics_lumps([("UNIF", 1, 1)])
+            lumps += [("F_START", b""), ("FLATU", flat()), ("F_END", b"")]
+        else:
+            lumps += graphics_lumps(
+                [("WALLE", 64, 64), ("WALLS", 64, 64), ("WALLW", 64, 64), ("WALLN", 64, 64),
+                 ("WALLED", 64, 64), ("UPPER1", 64, 64), ("UPPER2", 64, 64),
+                 ("LOWER1", 64, 64), ("LOWER2", 64, 64), ("SKY1", 256, 128)],
+                ["FLATW", "CEILW", "FLATE", "CEILE"], colormap_data=colormap)
+    return lumps
 
 
 def split_map_lumps():
@@ -96,30 +133,41 @@ def split_map_lumps():
         segs=[(3, 0, 0, 0, 0, 0), (1, 2, 0, 2, 0, 0)],
         ssectors=[(1, 0), (1, 1)],
         nodes=[(64, 0, 0, 128, 1, 0, True, True)],
-    )
+    ) + graphics_lumps()  # palette/colormaps only: point_sector tests need render.sql
 
 
 def make_db(tmp, lumps) -> object:
+    tmp.mkdir(exist_ok=True)
     wad = write_wad(tmp / "map.wad", lumps)
     db = tmp / "map.duckdb"
     assert run_import(wad, db).returncode == 0
     return db
 
 
-def md5_color(name: str) -> tuple[int, int, int]:
-    """D7 base RGB: md5(name) hex bytes 1-3, each mapped through 64 + byte % 160."""
-    digest = hashlib.md5(name.encode("ascii")).hexdigest()
-    return tuple(64 + int(digest[2 * i:2 * i + 2], 16) % 160 for i in range(3))
+def pal(index: int) -> tuple[int, int, int]:
+    """The test palette's RGB for palette index `index`: palette[i] = (i, 255-i, i//2)."""
+    return (index, 255 - index, index // 2)
 
 
-def shaded(color, light: int, depth: int | None = None) -> tuple[int, int, int]:
-    """D7 shading: flats by light/255, walls by light/255 * greatest(0.35, 1 - depth/1600).
+def tex(u: int, v: int) -> tuple[int, int, int]:
+    """The test pattern's texel (u, v) as rendered RGB: texel(u, v) = (u + 4v) % 256
+    (wadbuilder.test_texture/test_flat), shown directly through the identity colormap
+    (G7: pixel = palette[colormaps[level][texel]] and colormaps[k][c] = c)."""
+    return pal((u + 4 * v) % 256)
 
-    Channels round half away from zero (DuckDB round); floor(x + 0.5) agrees for the
-    non-negative values here, and at these light levels an exact .5 tie cannot occur.
-    """
-    factor = light / 255 * (1 if depth is None else max(0.35, 1 - depth / 1600))
-    return tuple(min(255, max(0, math.floor(c * factor + 0.5))) for c in color)
+
+def east_u(c: int, width: int = WIDTH) -> int:
+    """G4 wall u of the east wall hit at t = 128 by column c: the linedef runs
+    (128, 128) -> (128, -128) with the room on its front side, so
+    dist = s * 256 = 128 + 128 * u_c (no x_offset)."""
+    return int(math.floor(128 + 128 * (c + 0.5 - width / 2) / (width / 2))) % 64
+
+
+def east_v(y: int, top: float = 72.0, height: int = HEIGHT, t: float = 128.0) -> int:
+    """G4 wall v of pixel row y at depth t: z = 41 - (y + 0.5 - height/2) * t / 8 and
+    v = floor(top - z) mod 64 (no y_offset)."""
+    z = 41 - (y + 0.5 - height / 2) * t / 8
+    return int(math.floor(top - z)) % 64
 
 
 def grid(db, macro: str) -> list[list[tuple]]:
@@ -229,8 +277,10 @@ def test_render_ansi_matches_the_d8_encoding_exactly(tmp):
 
 
 def test_render_ansi_emits_no_repeated_codes_when_colors_repeat(tmp):
-    # The uniform corridor at angle 0: every column of a row has the same colors.
-    db = make_db(tmp, corridor_map_lumps())
+    # The uniform corridor at angle 0: every pixel of a row repeats one color (the 1x1
+    # texture and the all-zero flat show one texel, and wall depth and lighting are
+    # constant across columns).
+    db = make_db(tmp, corridor_map_lumps(uniform=True))
 
     text = render_query(db, "SELECT text FROM render_ansi('E1M1', 0, 0, 0, 16, 5)")[0][0]
 
@@ -263,17 +313,24 @@ def test_square_room_rows_are_ceiling_wall_floor_in_every_column(tmp):
         assert list(column) == ["ceiling"] * 3 + ["wall"] * 5 + ["floor"] * 2
 
 
-def test_square_room_pixel_colors_come_from_md5_and_shading(tmp):
+def test_square_room_pixel_colors_come_from_wall_and_flat_texels(tmp):
+    """G4/G5 anchors through the identity colormap. Column 8 has u_c = 1/16: the east
+    wall is hit at dist = 128 + 8 = 136, so u_tex = 136 mod 64 = 8; its middle wall
+    rows have z = 41 - (y - 4.5)*16 and v = floor(72 - z) = 16y - 41 (mod 64)."""
     db = make_db(tmp, corridor_map_lumps())
 
     pixels = grid(db, f"render_pixels('E1M1', 0, 0, 0, {WIDTH}, {HEIGHT})")
-    wall = shaded(md5_color("WALLE"), 160, 128)  # east wall, one-sided, t = 128
-    ceiling = shaded(md5_color("CEILW"), 160)
-    floor = shaded(md5_color("FLATW"), 160)
-    assert pixels[5][5][3:] == wall
-    assert pixels[0][0][3:] == ceiling
-    assert pixels[9][WIDTH - 1][3:] == floor
-    assert {cell[3:] for row in pixels for cell in row} == {wall, ceiling, floor}
+    assert [pixels[y][8][3] for y in range(3, 8)] == [tex(8, v)[0] for v in (7, 23, 39, 55, 7)]
+    # The far right column: dist = 128 + 128 * 15.5/8 = 248 -> u = 56.
+    assert pixels[5][15][3:] == tex(56, 39)
+    # G5: the ceiling at row 0, column 8 has d = 31*8/4.5 = 55.11, so its world point
+    # is (55.11, -3.44) (u_c = 1/16), texel (55, 3) of the test flat; the floor at
+    # row 8 has d = 41*8/3.5 = 93.714..., texel (93 mod 64, floor(5.86) = 5).
+    assert pixels[0][8][3:] == tex(55, 3)
+    assert pixels[8][8][3:] == tex(29, 5)
+    # Every other pixel follows the same formulas (test_textures_render.py compares
+    # the full grid against a Python implementation of G4/G5).
+    assert pixels[3][15][3:] == tex(east_u(15), east_v(3))
 
 
 def test_two_sided_step_draws_lower_but_no_upper(tmp):
@@ -291,15 +348,23 @@ def test_two_sided_step_pixel_colors_use_near_and_far_sector_data(tmp):
     db = make_db(tmp, corridor_map_lumps(step=True))
 
     pixels = grid(db, f"render_pixels('E1M1', 0, 0, 0, {WIDTH}, {HEIGHT})")
-    # Row 0: near (west) ceiling. Rows 1-2: far (east) ceiling, drawn by the t=128 hit.
-    assert pixels[0][5][3:] == shaded(md5_color("CEILW"), 160)
-    assert pixels[1][5][3:] == shaded(md5_color("CEILE"), 160)
-    # Rows 3-5: the east wall's front (east) sidedef middle texture, near sector = east.
-    assert pixels[4][5][3:] == shaded(md5_color("WALLED"), 160, 128)
-    # Row 6: the east sector's floor peeking above its wall base.
-    assert pixels[6][5][3:] == shaded(md5_color("FLATE"), 160)
-    # Rows 7-9: lower texture of the west (back, near-side) sidedef at t = 64.
-    assert pixels[8][5][3:] == shaded(md5_color("LOWER2"), 160, 64)
+    # Column 5 has u_c = -0.3125, so dy = -u_c = +0.3125 and the x = 64 and x = 128
+    # hits sit at y = 20 and y = 40.
+    # Row 0: near (west) ceiling at t = 64, d = 31*8/4.5 = 55.11 -> texel
+    # (55, floor(-17.22) mod 64 = 46). Rows 1-2: far (east) ceiling at t = 128,
+    # d = 31*8/3.5 = 70.86 -> texel (70 mod 64, floor(-22.14) mod 64 = 41).
+    assert pixels[0][5][3:] == tex(55, 46)
+    assert pixels[1][5][3:] == tex(6, 41)
+    # Rows 3-5: the east wall's front (east) sidedef middle texture, near sector =
+    # east: dist = 128 + 128*u_c = 88 -> u = 24; v = floor(72 - z) = 23 at row 4.
+    assert pixels[4][5][3:] == tex(24, 23)
+    # Row 6: the east sector's floor peeking above its wall base, d = 41*8/1.5 = 90.67
+    # -> texel (90 mod 64, floor(-28.33) mod 64 = 35).
+    assert pixels[6][5][3:] == tex(26, 35)
+    # Rows 7-9: lower texture of the west (back, near-side) sidedef at t = 64: the hit
+    # sits at y = 20, s = 148/256, dist = (1 - s)*256 = 108 -> u = 44; v = floor(24 - z).
+    assert pixels[7][5][3:] == tex(44, 3)
+    assert pixels[9][5][3:] == tex(44, 19)
 
 
 def test_render_rgb_is_row_major_rgb_matching_render_pixels(tmp):

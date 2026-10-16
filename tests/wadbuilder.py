@@ -32,7 +32,7 @@ def map_lumps(
 ) -> list[tuple[str, bytes]]:
     """A map from plain tuples.
 
-    linedefs: (v1, v2, front_sidedef, back_sidedef or None); sidedefs: sector, or
+    linedefs: (v1, v2, front_sidedef, back_sidedef or None[, flags]); sidedefs: sector, or
     (sector, middle, upper, lower) textures; sectors: (floor, ceiling), or
     (floor, ceiling, floor_texture, ceiling_texture, light_level); things:
     (x, y, type), or (x, y, angle, type) with angle in degrees. BSP lumps default to
@@ -41,10 +41,13 @@ def map_lumps(
     right_child, left_child, right_is_ssector, left_is_ssector).
     """
     def sidedef(s) -> bytes:
-        # WAD SIDEDEFS store upper, lower, middle; tuples here are (sector, middle, upper, lower).
+        # WAD SIDEDEFS store upper, lower, middle; tuples here are (sector, middle, upper,
+        # lower[, x_offset, y_offset]).
         sector, *textures = s if isinstance(s, tuple) else (s,)
         middle, upper, lower = (*textures, *(["-"] * 3))[:3]
-        return (struct.pack("<hh", 0, 0)
+        xoff = textures[3] if len(textures) > 3 else 0
+        yoff = textures[4] if len(textures) > 4 else 0
+        return (struct.pack("<hh", xoff, yoff)
                 + name8(upper) + name8(lower) + name8(middle)
                 + struct.pack("<H", sector))
 
@@ -55,8 +58,9 @@ def map_lumps(
             for x, y, *rest in things
         )),
         ("LINEDEFS", b"".join(
-            struct.pack("<HHhhhHH", a, b, 0, 0, 0, front, 0xFFFF if back is None else back)
-            for a, b, front, back in linedefs
+            struct.pack("<HHhhhHH", ld[0], ld[1], ld[4] if len(ld) > 4 else 0, 0, 0,
+                        ld[2], 0xFFFF if ld[3] is None else ld[3])
+            for ld in linedefs
         )),
         ("SIDEDEFS", b"".join(sidedef(s) for s in sidedefs)),
         ("VERTEXES", b"".join(struct.pack("<2h", x, y) for x, y in vertexes)),
@@ -113,6 +117,18 @@ def colormap(levels: list[list[int]] | None = None) -> bytes:
     return bytes(b for level in levels for b in level)
 
 
+def identity_colormap() -> bytes:
+    """COLORMAP where every level maps each entry to itself: rendering shows
+    palette[texel] directly, independent of lighting (texture-mapping tests)."""
+    return colormap([list(range(256)) for _ in range(34)])
+
+
+def reveal_colormap() -> bytes:
+    """COLORMAP where level k maps every entry to k: the rendered pixel's palette
+    index reveals its lighting level (G7 lighting tests)."""
+    return colormap([[k] * 256 for k in range(34)])
+
+
 def picture(width: int, height: int, columns: dict[int, list[tuple[int, list[int]]]],
             leftoffset: int = 0, topoffset: int = 0) -> bytes:
     """A picture-format patch (wall texture or sprite): header, per-column offsets, then
@@ -166,6 +182,41 @@ def flat(overrides: dict[int, int] | None = None) -> bytes:
     for i, v in (overrides or {}).items():
         data[i] = v
     return bytes(data)
+
+
+def test_texture(width: int, height: int) -> bytes:
+    """A full-size single-patch texture with the test pattern texel(u, v) = (u + 4v) % 256:
+    decodable through the test palette (palette[i] = (i, 255-i, i//2)) and the identity
+    colormap, since the rendered pixel then shows palette[texel] directly."""
+    return picture(width, height,
+                   {u: [(0, [(u + 4 * v) % 256 for v in range(height)])] for u in range(width)})
+
+
+def test_flat() -> bytes:
+    """A 64x64 flat with the test pattern texel(fx, fy) = (fx + 4*fy) % 256."""
+    return flat({fx + 64 * fy: (fx + 4 * fy) % 256 for fy in range(64) for fx in range(64)})
+
+
+def graphics_lumps(textures: list[tuple[str, int, int]] = (),
+                   flat_names: list[str] = (),
+                   colormap_data: bytes | None = None) -> list[tuple[str, bytes]]:
+    """PLAYPAL (the test palette), COLORMAP (identity by default), and, when textures
+    are given, PNAMES + TEXTURE1 with one full-size patch per texture drawn with the
+    test pattern; flat names become F_START..F_END flats with the same pattern. With
+    no textures, only palette/colormaps are populated (enough to load render.sql for
+    point_sector tests); a WAD without any graphics lumps imports with all graphics
+    tables empty (G3), which graphics=False callers use to test the renderer error."""
+    lumps = [("PLAYPAL", playpal()),
+             ("COLORMAP", colormap_data if colormap_data is not None else identity_colormap())]
+    if textures:
+        lumps += [("PNAMES", pnames([name for name, _, _ in textures])),
+                  ("TEXTURE1", texture_defs([
+                      (name, width, height, [(0, 0, i)])
+                      for i, (name, width, height) in enumerate(textures)]))]
+        lumps += [(name, test_texture(width, height)) for name, width, height in textures]
+    if flat_names:
+        lumps += [("F_START", b"")] + [(name, test_flat()) for name in flat_names] + [("F_END", b"")]
+    return lumps
 
 
 def sample_map_lumps(marker: str = "E1M1") -> list[tuple[str, bytes]]:

@@ -3,11 +3,29 @@
 import argparse
 import re
 import sys
+from importlib.resources import files as resource_files
 from pathlib import Path
 
 import duckdb
 
 MIN_SIZE, MAX_SIZE = 8, 4096
+
+
+class NoTextures(Exception):
+    """G3 (textures): the database predates the texture importer."""
+
+
+def load_render(con) -> None:
+    """Execute sql/render.sql once per connection (the viewer loads once; the renderer
+    and the tests once per run). Fails cleanly (G3) when the `textures` table is
+    missing or empty, i.e. the database was imported before the texture importer."""
+    try:
+        has_textures = con.execute("SELECT count(*) > 0 FROM textures").fetchone()[0]
+    except duckdb.Error:
+        has_textures = False
+    if not has_textures:
+        raise NoTextures("database has no textures: re-run sqldoom-import --force")
+    con.execute(resource_files("sqldoom").joinpath("sql/render.sql").read_text())
 
 
 def parse_size(value: str) -> tuple[int, int]:

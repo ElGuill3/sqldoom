@@ -96,6 +96,21 @@ def test_not_a_sqldoom_database(tmp):
     assert junk.read_bytes() == before  # opened read-only, byte-identical
 
 
+def test_database_without_textures(tmp):
+    """G3: rendering a database imported before the texture importer fails cleanly."""
+    wad = write_wad(tmp / "map.wad", corridor_map_lumps(graphics=False))
+    db = tmp / "map.duckdb"
+    assert run_import(wad, db).returncode == 0
+    out = tmp / "view.png"
+
+    result = run_render(db, "E1M1", "-o", out)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "error: database has no textures: re-run sqldoom-import --force\n"
+    assert not out.exists()
+
+
 def test_unknown_map_writes_no_file(tmp):
     db, out = make_db(tmp), tmp / "view.png"
 

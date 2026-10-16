@@ -8,10 +8,9 @@ bytes it returns in a PNG.
 
 import argparse
 import sys
-from importlib.resources import files
 from pathlib import Path
 
-from .common import MIN_SIZE, MAX_SIZE, fail, open_map, parse_pos, parse_size
+from .common import MIN_SIZE, MAX_SIZE, NoTextures, fail, load_render, open_map, parse_pos, parse_size
 from .png import encode_rgb
 
 RENDER_SIZE = (320, 200)  # PNG pixels
@@ -52,7 +51,10 @@ def main(argv: list[str] | None = None) -> int:
     with con:
         if not map_found:
             return fail(f"map not found: {map_name}")
-        con.execute(files("sqldoom").joinpath("sql/render.sql").read_text())
+        try:
+            load_render(con)
+        except NoTextures as exc:
+            return fail(str(exc))
         width, height = args.size or (TERMINAL_SIZE if args.output is None else RENDER_SIZE)
         # Each camera component defaults to the player 1 start; --pos and --angle
         # override independently. With no player start and a flag missing, error.

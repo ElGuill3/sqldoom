@@ -204,6 +204,21 @@ def test_viewer_walks_forward_and_quits_cleanly(tmp):
         os.close(master)
 
 
+def test_viewer_fails_cleanly_without_textures(tmp):
+    """G3: a database imported before the texture importer fails cleanly."""
+    wad = write_wad(tmp / "map.wad", corridor_map_lumps(graphics=False))
+    db = tmp / "map.duckdb"
+    assert run_import(wad, db).returncode == 0
+    proc, master, slave = spawn_viewer(db, rows=9, cols=20)
+    try:
+        deadline = time.monotonic() + 30
+        buf = read_until(master, b"database has no textures", deadline)
+        assert b"error: database has no textures: re-run sqldoom-import --force" in buf
+        assert proc.wait(timeout=10) == 1
+    finally:
+        stop_viewer(proc, master, slave)
+
+
 def test_requires_a_tty(tmp):
     db = make_db(tmp)
 

@@ -189,7 +189,7 @@ def test_first_person_png_output_is_stable(db, tmp_path):
 
     assert result.returncode == 0
     assert hashlib.sha256(out.read_bytes()).hexdigest() == (
-        "a977bf34502b434c6f7a4d828c9be84318117a3f7692f1656c1f01f1a46b184f"
+        "8df36af607f68825f4ec14bb1ed8417cee63c0ea11ee522a137766b02eb3d99c"
     )
 
 
@@ -198,5 +198,5 @@ def test_first_person_terminal_output_is_stable(db):
 
     assert result.returncode == 0
     assert hashlib.sha256(result.stdout).hexdigest() == (
-        "a003735cb6e4b58671544395b98b338b31ece3e5428b85c3c33ebcbc13d278fa"
+        "4f517a2ca2d329639825518d3d78bd3f9e7bd608a7df8b830113796db03212f1"
     )

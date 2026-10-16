@@ -1,26 +1,18 @@
--- First-person renderer, all SQL: which sector a point is in (T1) and the RGB
--- framebuffer of the view from a camera (T2). Python only wraps the bytes in a PNG.
+-- First-person renderer, all SQL: which sector a point is in (T1) and the textured,
+-- lit RGB framebuffer of the view from a camera (T2, odd/tasks/textures.md G4-G8).
+-- Python only wraps the bytes in a PNG.
 --
 -- Conventions (design D1): world angles in degrees, 0 = east, 90 = north
 -- (counterclockwise, same as THINGS); screen y grows downwards; FOV 90 degrees with
 -- focal f = width / 2 used for both axes.
 --
--- Per-frame work only shades: everything static is put into TEMP tables when this
--- file executes (built once per connection, for all maps, keyed by map; no change to
--- the database schema, and executing this file twice on one connection rebuilds them
--- with OR REPLACE). The BSP point_sector walks of D5 become precomputed half-plane
--- test chains (a), and linedefs are culled by an exact near-plane test (b).
-
--- One hex byte of an md5 digest as an integer (md5() returns lowercase hex).
-CREATE OR REPLACE TEMP MACRO hex_byte(hex, pos) AS
-    (instr('0123456789abcdef', substr(hex, pos, 1)) - 1) * 16
-    + (instr('0123456789abcdef', substr(hex, pos + 1, 1)) - 1);
-
--- D7 shaded channel: flats by light only, walls by light * greatest(0.35, 1 - t/1600);
--- rounded and clamped to 0..255.
-CREATE OR REPLACE TEMP MACRO shade(value, light, depth, wall) AS
-    CAST(round(least(255.0, greatest(0.0, value * light / 255.0
-        * (CASE WHEN wall THEN greatest(0.35, 1 - depth / 1600.0) ELSE 1.0 END)))) AS INTEGER);
+-- Per-frame work only picks texels and lighting: everything static is put into TEMP
+-- tables when this file executes (built once per connection, for all maps, keyed by
+-- map; no change to the database schema, and executing this file twice on one
+-- connection rebuilds them with OR REPLACE). The BSP point_sector walks of D5 become
+-- precomputed half-plane test chains (a), linedefs are culled by an exact near-plane
+-- test (b), and the G7 lit palette (palette[colormaps[level][texel]], packed RGB per
+-- level) is materialized in render_lit so a pixel reads one list entry.
 
 -- (a) The D5 walk of point_sector as data: for every map and subsector, the chain of
 -- half-plane tests from the root node down to it. Each row is one test: the node's
@@ -96,11 +88,15 @@ JOIN sidedefs ON sidedefs.map = map_name AND sidedefs.id =
 WHERE ssectors.map = map_name AND ssectors.id = 0
   AND NOT EXISTS (SELECT 1 FROM nodes WHERE map = map_name);
 
--- (c) Static line geometry for all maps, built once per connection.
+-- (c) Static line geometry for all maps, built once per connection. length feeds the
+-- G4 wall u (distance along the linedef); flags carry the pegging bits 8 (upper
+-- unpegged) and 16 (lower unpegged).
 CREATE OR REPLACE TEMP TABLE render_lines AS
 SELECT linedefs.map, linedefs.id AS line_id,
        a.x AS ax, a.y AS ay, b.x AS bx, b.y AS by,
        b.x - a.x AS ex, b.y - a.y AS ey,
+       sqrt(pow(b.x - a.x, 2.0) + pow(b.y - a.y, 2.0)) AS length,
+       linedefs.flags,
        linedefs.back_sidedef IS NULL AS one_sided
 FROM linedefs
 JOIN vertexes a ON a.map = linedefs.map AND a.id = linedefs.v1
@@ -115,12 +111,14 @@ CREATE OR REPLACE TEMP TABLE render_sides AS
 SELECT linedefs.map, linedefs.id AS line_id,
        sf.id IS NOT NULL AND secf.id IS NOT NULL AS front_side,
        sf.middle_texture AS front_middle, sf.upper_texture AS front_upper,
-       sf.lower_texture AS front_lower, secf.floor_height AS front_floor,
+       sf.lower_texture AS front_lower, sf.x_offset AS front_xoff,
+       sf.y_offset AS front_yoff, secf.floor_height AS front_floor,
        secf.ceiling_height AS front_ceiling, secf.light_level AS front_light,
        secf.floor_texture AS front_ftex, secf.ceiling_texture AS front_ctex,
        sb.id IS NOT NULL AND secb.id IS NOT NULL AS back_side,
        sb.middle_texture AS back_middle, sb.upper_texture AS back_upper,
-       sb.lower_texture AS back_lower, secb.floor_height AS back_floor,
+       sb.lower_texture AS back_lower, sb.x_offset AS back_xoff,
+       sb.y_offset AS back_yoff, secb.floor_height AS back_floor,
        secb.ceiling_height AS back_ceiling, secb.light_level AS back_light,
        secb.floor_texture AS back_ftex, secb.ceiling_texture AS back_ctex
 FROM linedefs
@@ -129,26 +127,22 @@ LEFT JOIN sectors secf ON secf.map = linedefs.map AND secf.id = sf.sector
 LEFT JOIN sidedefs sb ON sb.map = linedefs.map AND sb.id = linedefs.back_sidedef
 LEFT JOIN sectors secb ON secb.map = linedefs.map AND secb.id = sb.sector;
 
--- (c) D7 base RGB of every texture name (md5 hex bytes 1-3, each mapped through
--- 64 + byte % 160), built once per connection so per-frame work only shades.
-CREATE OR REPLACE TEMP TABLE render_texture_colors AS
-SELECT name,
-       64 + hex_byte(md5(name), 1) % 160 AS r,
-       64 + hex_byte(md5(name), 3) % 160 AS g,
-       64 + hex_byte(md5(name), 5) % 160 AS b
-FROM (
-    SELECT DISTINCT coalesce(texture, '-') AS name FROM (
-        SELECT middle_texture AS texture FROM sidedefs
-        UNION SELECT upper_texture FROM sidedefs
-        UNION SELECT lower_texture FROM sidedefs
-        UNION SELECT floor_texture FROM sectors
-        UNION SELECT ceiling_texture FROM sectors
-    ) names
-);
+-- (G7) The lit palette per colormap level, exploded: one row per (level, texel) with
+-- palette[colormaps[level][texel]] packed as r << 16 | g << 8 | b, so shading a pixel
+-- is one hash join on two integers (a per-row 256-entry list would be copied through
+-- every pixel join). Built once per connection.
+CREATE OR REPLACE TEMP TABLE render_lit AS
+SELECT colormaps.level, g.i AS texel,
+       coalesce(p.r * 65536 + p.g * 256 + p.b, 0) AS packed
+FROM colormaps
+CROSS JOIN generate_series(0, 255) g(i)
+LEFT JOIN palette p ON p.idx = list_extract(colormaps.colors, g.i + 1);
 
--- T2 (D2-D7): every visible pixel of the view from (px, py) at `angle` degrees, as
+-- T2 (S2, G4-G8): every visible pixel of the view from (px, py) at `angle` degrees, as
 -- (x, y, surface, r, g, b) rows. Surfaces: 'ceiling', 'wall', 'upper', 'lower',
--- 'floor', 'sky', 'empty'.
+-- 'floor', 'sky', 'empty' (G8, unchanged). Colors come from the imported graphics:
+-- pixel RGB = palette[colormaps[level][texel]] (G7) with the texel picked per G4
+-- (walls), G5 (flats), or G6 (sky).
 CREATE OR REPLACE TEMP MACRO render_pixels(map_name, px, py, angle, width, height) AS TABLE
 WITH camera AS (
     -- D5: eye height is the floor of the camera's sector + 41 (Doom VIEWHEIGHT).
@@ -160,11 +154,15 @@ WITH camera AS (
 rays AS (
     -- D2: column c has u = (c + 0.5 - width/2) / f and direction D = F + u * R with
     -- F = (cos a, sin a), R = (sin a, -cos a). D is not normalized, so t is
-    -- perpendicular depth.
+    -- perpendicular depth. sky_u is the G6 sky column: floor(ray_angle_deg * 1024/360)
+    -- mod 256 of the unnormalized column ray.
     SELECT g.c,
            (g.c + 0.5 - width / 2.0) / f AS u,
            cos(rad) + (g.c + 0.5 - width / 2.0) / f * sin(rad) AS dx,
-           sin(rad) - (g.c + 0.5 - width / 2.0) / f * cos(rad) AS dy
+           sin(rad) - (g.c + 0.5 - width / 2.0) / f * cos(rad) AS dy,
+           ((CAST(floor(degrees(atan2(sin(rad) - (g.c + 0.5 - width / 2.0) / f * cos(rad),
+                                      cos(rad) + (g.c + 0.5 - width / 2.0) / f * sin(rad)))
+                         * 1024.0 / 360.0) AS BIGINT) % 256) + 256) % 256 AS sky_u
     FROM generate_series(0, width - 1) g(c) CROSS JOIN camera
 ),
 lines AS (
@@ -175,10 +173,11 @@ lines AS (
     -- t >= 1. The 1e-9 margin only absorbs rounding differences between this dot
     -- product and the cross-product t below, so culling can never drop a hit the
     -- exact t >= 1 test would keep.
-    SELECT line_id, ax, ay, ex, ey, one_sided
+    SELECT line_id, ax, ay, ex, ey, length, flags, one_sided
     FROM (
         SELECT render_lines.line_id, render_lines.ax, render_lines.ay,
-               render_lines.ex, render_lines.ey, render_lines.one_sided,
+               render_lines.ex, render_lines.ey, render_lines.length,
+               render_lines.flags, render_lines.one_sided,
                greatest((render_lines.ax - px) * cos(camera.rad)
                             + (render_lines.ay - py) * sin(camera.rad),
                         (render_lines.bx - px) * cos(camera.rad)
@@ -192,14 +191,17 @@ raw AS (
     -- D3: segment A + s * (B - A) against ray P + t * D, with w = A - P and
     -- cross(p, q) = p.x*q.y - p.y*q.x. cross(w, E) equals cross(E, P - A), so its sign
     -- also tells which side (D4: front) the camera is on.
-    SELECT rays.c, lines.line_id, lines.one_sided,
+    SELECT rays.c, lines.line_id, lines.one_sided, lines.ex, lines.ey, lines.length,
+           lines.flags, rays.dx, rays.dy, rays.sky_u,
            rays.dx * lines.ey - rays.dy * lines.ex AS den,
            (lines.ax - px) * lines.ey - (lines.ay - py) * lines.ex AS cwe,
            (lines.ax - px) * rays.dy - (lines.ay - py) * rays.dx AS cwd
     FROM rays CROSS JOIN lines
 ),
 hits AS (
-    SELECT c, line_id, one_sided, cwe / den AS t,
+    SELECT c, line_id, one_sided, ex, ey, length, flags, dx, dy, sky_u,
+           cwe / den AS t,
+           cwd / den AS s,
            CASE WHEN one_sided OR cwe < 0 THEN 0 ELSE 1 END AS near_side
     FROM raw
     WHERE den <> 0 AND cwe / den >= 1 AND cwd / den BETWEEN 0 AND 1
@@ -207,16 +209,19 @@ hits AS (
 sides AS (
     -- (c): the per-map rows of the static wide sides table.
     SELECT line_id, front_side, front_middle, front_upper, front_lower,
-           front_floor, front_ceiling, front_light, front_ftex, front_ctex,
+           front_xoff, front_yoff, front_floor, front_ceiling, front_light,
+           front_ftex, front_ctex,
            back_side, back_middle, back_upper, back_lower,
-           back_floor, back_ceiling, back_light, back_ftex, back_ctex
+           back_xoff, back_yoff, back_floor, back_ceiling, back_light,
+           back_ftex, back_ctex
     FROM render_sides
     WHERE map = map_name
 ),
 geom AS (
     -- D4: the near side faces the camera (the front side for one-sided lines, whose
-    -- front sector is the near sector); the far side is the other one. (The far
-    -- light level and floor texture are never read by the spans below.)
+    -- front sector is the near sector); the far side is the other one. dist is the G4
+    -- distance along the linedef: from v1 (s * length) when the near side is the
+    -- front, from v2 ((1 - s) * length) when it is the back.
     SELECT hits.c, hits.t, hits.line_id, hits.one_sided,
            CASE WHEN hits.near_side = 0 THEN sides.front_middle ELSE sides.back_middle END AS middle_texture,
            CASE WHEN hits.near_side = 0 THEN sides.front_upper ELSE sides.back_upper END AS upper_texture,
@@ -228,7 +233,12 @@ geom AS (
            CASE WHEN hits.near_side = 0 THEN sides.front_ctex ELSE sides.back_ctex END AS nct,
            CASE WHEN hits.near_side = 0 THEN sides.back_floor ELSE sides.front_floor END AS xf,
            CASE WHEN hits.near_side = 0 THEN sides.back_ceiling ELSE sides.front_ceiling END AS xc,
-           CASE WHEN hits.near_side = 0 THEN sides.back_ctex ELSE sides.front_ctex END AS xct
+           CASE WHEN hits.near_side = 0 THEN sides.back_ctex ELSE sides.front_ctex END AS xct,
+           CASE WHEN hits.near_side = 0 THEN sides.front_xoff ELSE sides.back_xoff END AS nxoff,
+           CASE WHEN hits.near_side = 0 THEN sides.front_yoff ELSE sides.back_yoff END AS nyoff,
+           CASE WHEN hits.near_side = 0 THEN hits.s * hits.length
+                ELSE (1 - hits.s) * hits.length END AS dist,
+           hits.ex, hits.ey, hits.flags, hits.dx, hits.dy, hits.sky_u
     FROM hits
     JOIN sides ON sides.line_id = hits.line_id
         -- the near side must have resolved (the old INNER JOIN); the far side stays
@@ -238,18 +248,28 @@ geom AS (
 projected AS (
     -- D6: y(z) = height/2 - (z - eye) * f / t, for the near and far sector bounds.
     -- (t, line_id) identifies a hit within a column and sorts nearest-first, so it
-    -- plays the role of the rank the old row_number window computed.
+    -- plays the role of the rank the old row_number window computed. wall_level is
+    -- the G7 lighting of a wall hit: fake contrast (+1 on vertical lines, -1 on
+    -- horizontal ones, as in r_segs.c) on the clamped sector light, then the depth
+    -- scale least(47, floor(2560/t)); flats only need their start map here, their
+    -- depth factor runs per pixel.
     SELECT geom.*, height / 2.0 - (nc - eye) * f / t AS cyn,
            height / 2.0 - (nf - eye) * f / t AS fyn,
            height / 2.0 - (xc - eye) * f / t AS cyf,
-           height / 2.0 - (xf - eye) * f / t AS fyf
+           height / 2.0 - (xf - eye) * f / t AS fyf,
+           greatest(0, least(31,
+               (15 - least(15, greatest(0, (nl >> 4)
+                   + CASE WHEN ex = 0 THEN 1 WHEN ey = 0 THEN -1 ELSE 0 END))) * 4
+               - least(47, CAST(floor(2560.0 / t) AS BIGINT)) // 2)) AS wall_level,
+           (15 - (nl >> 4)) * 4 AS flat_startmap
     FROM geom, camera
 ),
 openings AS (
     -- D6: a two-sided hit opens the window [greatest(cy_n, cy_f), least(fy_n, fy_f));
     -- a solid hit closes the column (empty opening).
     SELECT c, t, line_id, one_sided, middle_texture, upper_texture, lower_texture,
-           cyn, fyn, cyf, fyf, nl, nft, nct, xct,
+           nf, nc, xf, xc, cyn, fyn, cyf, fyf, nft, nct, xct,
+           nxoff, nyoff, dist, ex, ey, flags, dx, dy, sky_u, wall_level, flat_startmap,
            CASE WHEN one_sided THEN 0.0 ELSE greatest(cyn, cyf) END AS opening_top,
            CASE WHEN one_sided THEN 0.0 ELSE least(fyn, fyf) END AS opening_bottom
     FROM projected
@@ -271,62 +291,118 @@ windows AS (
 ),
 spans AS (
     -- D6: each hit draws, clipped to its window, its near ceiling, its walls, and its
-    -- near floor. A span [a, b) only exists when b > a. Base colors come from the
-    -- static D7 table (a); only shading runs per frame.
+    -- near floor; a span [a, b) only exists when b > a. Surfaces keep the G8 names.
+    -- Every span carries what its pixels need: 'w' (walls, G4) the texture column at
+    -- u = floor(dist + x_offset) mod width plus the pegging top; 'f' (flats, G5) the
+    -- flat and its world height; 's' (sky, G6) the SKY1 column at sky_u. The texture
+    -- column joins run per hit (and per column u), never per pixel.
     SELECT * FROM (
         -- near ceiling [window top, cy_n): sky when the ceiling texture is F_SKY1
-        SELECT c, t, line_id, 0 AS prio, window_top AS lo, least(cyn, window_bottom) AS hi,
-               CASE WHEN nct = 'F_SKY1' THEN 'sky' ELSE 'ceiling' END AS surface,
-               CASE WHEN nct = 'F_SKY1' THEN 100 ELSE shade(cn.r, nl, t, false) END AS r,
-               CASE WHEN nct = 'F_SKY1' THEN 150 ELSE shade(cn.g, nl, t, false) END AS g,
-               CASE WHEN nct = 'F_SKY1' THEN 220 ELSE shade(cn.b, nl, t, false) END AS b
-        FROM windows
-        JOIN render_texture_colors cn ON cn.name = coalesce(nct, '-')
+        SELECT w.c, w.t, w.line_id, 0 AS prio, w.window_top AS lo,
+               least(w.cyn, w.window_bottom) AS hi,
+               CASE WHEN w.nct = 'F_SKY1' THEN 'sky' ELSE 'ceiling' END AS surface,
+               CASE WHEN w.nct = 'F_SKY1' THEN 's' ELSE 'f' END AS kind,
+               CASE WHEN w.nct = 'F_SKY1' THEN skyc.pixels
+                    ELSE CAST(flatc.pixels AS UTINYINT[]) END AS pixels,
+               NULL::DOUBLE AS top, NULL::DOUBLE AS yoff, NULL::INTEGER AS texh,
+               CASE WHEN w.nct = 'F_SKY1' THEN NULL ELSE w.nc END AS h,
+               w.dx, w.dy, NULL::BIGINT AS startmap, NULL::INTEGER AS level
+        FROM windows w
+        LEFT JOIN flats flatc ON w.nct <> 'F_SKY1' AND flatc.name = w.nct
+        LEFT JOIN texture_columns skyc ON w.nct = 'F_SKY1' AND skyc.texture = 'SKY1'
+            AND skyc.u = w.sky_u
         UNION ALL
-        -- solid wall [cy_n, fy_n), textured with the near side's middle texture
-        SELECT c, t, line_id, 1, greatest(cyn, window_top) AS lo, least(fyn, window_bottom) AS hi, 'wall',
-               shade(cw.r, nl, t, true), shade(cw.g, nl, t, true), shade(cw.b, nl, t, true)
-        FROM windows
-        JOIN render_texture_colors cw ON cw.name = coalesce(middle_texture, '-')
-        WHERE one_sided
+        -- solid wall [cy_n, fy_n), textured with the near side's middle texture; G4
+        -- pegging: top = near_ceiling, or near_floor + texheight with flag 16
+        SELECT w.c, w.t, w.line_id, 1, greatest(w.cyn, w.window_top),
+               least(w.fyn, w.window_bottom), 'wall', 'w', tcol.pixels,
+               CASE WHEN (w.flags & 16) <> 0 THEN w.nf + tex.height ELSE w.nc END,
+               w.nyoff, tex.height, NULL::DOUBLE, w.dx, w.dy, NULL::BIGINT, w.wall_level
+        FROM windows w
+        LEFT JOIN textures tex ON tex.name = w.middle_texture
+        LEFT JOIN texture_columns tcol ON tcol.texture = tex.name
+            AND tcol.u = ((CAST(floor(w.dist + w.nxoff) AS BIGINT) % tex.width + tex.width) % tex.width)
+        WHERE w.one_sided
         UNION ALL
-        -- upper wall [cy_n, cy_f), skipped when both ceilings are sky
-        SELECT c, t, line_id, 2, greatest(cyn, window_top), least(cyf, window_bottom), 'upper',
-               shade(cu.r, nl, t, true), shade(cu.g, nl, t, true), shade(cu.b, nl, t, true)
-        FROM windows
-        JOIN render_texture_colors cu ON cu.name = coalesce(upper_texture, '-')
-        WHERE NOT one_sided AND cyf > cyn AND NOT (nct = 'F_SKY1' AND xct = 'F_SKY1')
+        -- upper wall [cy_n, cy_f), skipped when both ceilings are sky (D6); G4:
+        -- top = near_ceiling with flag 8, else far_ceiling + texheight
+        SELECT w.c, w.t, w.line_id, 2, greatest(w.cyn, w.window_top),
+               least(w.cyf, w.window_bottom), 'upper', 'w', tcol.pixels,
+               CASE WHEN (w.flags & 8) <> 0 THEN w.nc ELSE w.xc + tex.height END,
+               w.nyoff, tex.height, NULL::DOUBLE, w.dx, w.dy, NULL::BIGINT, w.wall_level
+        FROM windows w
+        LEFT JOIN textures tex ON tex.name = w.upper_texture
+        LEFT JOIN texture_columns tcol ON tcol.texture = tex.name
+            AND tcol.u = ((CAST(floor(w.dist + w.nxoff) AS BIGINT) % tex.width + tex.width) % tex.width)
+        WHERE NOT w.one_sided AND w.cyf > w.cyn AND NOT (w.nct = 'F_SKY1' AND w.xct = 'F_SKY1')
         UNION ALL
-        -- lower wall [fy_f, fy_n)
-        SELECT c, t, line_id, 3, greatest(fyf, window_top), least(fyn, window_bottom), 'lower',
-               shade(cl.r, nl, t, true), shade(cl.g, nl, t, true), shade(cl.b, nl, t, true)
-        FROM windows
-        JOIN render_texture_colors cl ON cl.name = coalesce(lower_texture, '-')
-        WHERE NOT one_sided AND fyf < fyn
+        -- lower wall [fy_f, fy_n); G4: top = near_ceiling with flag 16, else far_floor
+        SELECT w.c, w.t, w.line_id, 3, greatest(w.fyf, w.window_top),
+               least(w.fyn, w.window_bottom), 'lower', 'w', tcol.pixels,
+               CASE WHEN (w.flags & 16) <> 0 THEN w.nc ELSE w.xf END,
+               w.nyoff, tex.height, NULL::DOUBLE, w.dx, w.dy, NULL::BIGINT, w.wall_level
+        FROM windows w
+        LEFT JOIN textures tex ON tex.name = w.lower_texture
+        LEFT JOIN texture_columns tcol ON tcol.texture = tex.name
+            AND tcol.u = ((CAST(floor(w.dist + w.nxoff) AS BIGINT) % tex.width + tex.width) % tex.width)
+        WHERE NOT w.one_sided AND w.fyf < w.fyn
         UNION ALL
-        -- near floor [fy_n, window bottom)
-        SELECT c, t, line_id, 4, greatest(fyn, window_top), window_bottom, 'floor',
-               shade(cf.r, nl, t, false), shade(cf.g, nl, t, false), shade(cf.b, nl, t, false)
-        FROM windows
-        JOIN render_texture_colors cf ON cf.name = coalesce(nft, '-')
+        -- near floor [fy_n, window bottom): the near floor flat (G5)
+        SELECT w.c, w.t, w.line_id, 4, greatest(w.fyn, w.window_top), w.window_bottom,
+               'floor', 'f', CAST(flatf.pixels AS UTINYINT[]), NULL::DOUBLE, NULL::DOUBLE, NULL::INTEGER,
+               w.nf, w.dx, w.dy, w.flat_startmap, NULL::INTEGER
+        FROM windows w
+        LEFT JOIN flats flatf ON flatf.name = w.nft
     ) all_spans
     WHERE hi > lo
 ),
+rows_px AS (
+    -- D6: a span [a, b) covers pixel rows ceil(a - 0.5) .. ceil(b - 0.5) - 1. G5: rows
+    -- on the horizon are skipped (the flat depth d would divide by zero there).
+    SELECT s.*, g.y,
+           (s.h - camera.eye) * camera.f / (height / 2.0 - g.y - 0.5) AS d
+    FROM spans s CROSS JOIN camera
+    CROSS JOIN generate_series(CAST(ceil(s.lo - 0.5) AS BIGINT),
+                               CAST(ceil(s.hi - 0.5) AS BIGINT) - 1) g(y)
+    WHERE s.kind <> 'f' OR height / 2.0 - g.y - 0.5 <> 0
+),
 pixels AS (
-    -- D6: a span [a, b) covers pixel rows ceil(a - 0.5) .. ceil(b - 0.5) - 1.
-    SELECT spans.c, g.y, spans.surface, spans.r, spans.g, spans.b, spans.t, spans.line_id, spans.prio
-    FROM spans, generate_series(CAST(ceil(spans.lo - 0.5) AS BIGINT),
-                                CAST(ceil(spans.hi - 0.5) AS BIGINT) - 1) g(y)
+    -- The texel (G4/G5/G6) and lighting level (G7) of every covered pixel.
+    SELECT r.c, r.y, r.surface, r.t, r.line_id, r.prio,
+           CAST(CASE
+             WHEN r.kind = 'w' THEN list_extract(r.pixels,
+                 (((CAST(floor(r.top - (camera.eye - (r.y + 0.5 - height / 2.0) * r.t / camera.f)
+                              + r.yoff) AS BIGINT) % r.texh) + r.texh) % r.texh) + 1)
+             WHEN r.kind = 'f' THEN list_extract(r.pixels,
+                 (((CAST(floor(-(px + r.d * r.dy)) AS BIGINT) % 64 + 64) % 64) * 64
+                  + ((CAST(floor(px + r.d * r.dx) AS BIGINT) % 64 + 64) % 64)) + 1)
+             ELSE list_extract(r.pixels,
+                 (((CAST(floor((r.y + 0.5) * 200.0 / height) AS BIGINT) % 128) + 128) % 128) + 1)
+           END AS INTEGER) AS texel,
+           CASE WHEN r.kind = 'w' THEN r.level
+                WHEN r.kind = 'f' THEN least(31, greatest(0, r.startmap
+                     - 80 // (least(127, CAST(floor(r.d / 16.0) AS BIGINT)) + 1)))
+                ELSE 0 END AS level
+    FROM rows_px r CROSS JOIN camera
 ),
 best AS (
     -- D6: if two spans still claim one pixel, the nearest hit wins. (t, line_id) is
     -- unique per column, so ordering by it equals the old rank order; arg_min is a
     -- hash aggregate, cheaper than the old row_number window over every pixel.
+    -- G7: the pixel color is palette[colormaps[level][texel]], joined from render_lit;
+    -- a missing texel (no texture) draws palette index 0.
     SELECT c, y, pick.surface AS surface, pick.r AS r, pick.g AS g, pick.b AS b
     FROM (
-        SELECT c, y, arg_min(struct_pack(surface := surface, r := r, g := g, b := b),
+        SELECT c, y, arg_min(struct_pack(surface := surface, r := packed // 65536,
+                                         g := packed // 256 % 256, b := packed % 256),
                              struct_pack(t := t, line_id := line_id, prio := prio)) AS pick
-        FROM pixels GROUP BY c, y
+        FROM (
+            SELECT p.c, p.y, p.surface, p.t, p.line_id, p.prio,
+                   coalesce(l.packed, 0) AS packed
+            FROM pixels p
+            LEFT JOIN render_lit l ON l.level = p.level AND l.texel = coalesce(p.texel, 0)
+        )
+        GROUP BY c, y
     )
 )
 SELECT x.c AS x, y.y AS y,

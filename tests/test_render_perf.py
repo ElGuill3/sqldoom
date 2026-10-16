@@ -21,7 +21,7 @@ import pytest
 
 from conftest import render_query, run_import
 from test_render import corridor_map_lumps, make_db, split_map_lumps
-from wadbuilder import map_lumps, write_wad
+from wadbuilder import graphics_lumps, map_lumps, write_wad
 
 
 def reference_walk(db, map_name: str):
@@ -155,7 +155,7 @@ def on_line_map_lumps():
         segs=[(3, 0, 0, 0, 0, 0), (1, 2, 0, 2, 0, 0)],
         ssectors=[(1, 0), (1, 1)],
         nodes=[(64, 0, 0, 128, 1, 0, True, True)],
-    )
+    ) + graphics_lumps()  # palette/colormaps only: point_sector tests need render.sql
 
 
 def test_point_exactly_on_a_split_line_goes_to_the_left_child(tmp):
