@@ -3,14 +3,16 @@
 The viewer owns the terminal and the camera (design D9 in odd/tasks/first-person.md):
 every frame is one render_ansi query on a single read-only connection, and the
 terminal is put into raw input mode inside the alternate screen with synchronized
-updates, always restored on exit, Ctrl-C, or error. Part 5 moves the player state
-into SQL.
+updates, always restored on exit, Ctrl-C, error, or a kill signal (SIGTERM/SIGHUP).
+Without --size the frame follows terminal resizes (SIGWINCH, redrawn from the
+self-pipe in the main loop). Part 5 moves the player state into SQL.
 """
 
 import argparse
 import math
 import os
 import select
+import signal
 import sys
 import termios
 import time
@@ -73,10 +75,12 @@ def step(camera: tuple[float, float, float], action: str) -> tuple[float, float,
     return (x, y, angle % 360.0)
 
 
-def frame(con, map_name: str, camera: tuple[float, float, float], cols: int, rows: int) -> str:
+def frame(con, map_name: str, camera: tuple[float, float, float], cols: int, rows: int,
+          clear: bool = False) -> str:
     """One synchronized frame: cursor home, the render_ansi text, the status line.
 
-    The render time doubles as the fps the status line reports.
+    With clear (a resize redraw) the screen is erased first so no cells of the old
+    frame size remain. The render time doubles as the fps the status line reports.
     """
     start = time.perf_counter()
     (text,) = con.execute(
@@ -87,7 +91,7 @@ def frame(con, map_name: str, camera: tuple[float, float, float], cols: int, row
     x, y, angle = camera
     status = (f"{map_name}  x={int(round(x))} y={int(round(y))} angle={int(round(angle))}"
               f"  {fps:.1f} fps  {KEY_HELP}")
-    return f"\x1b[?2026h\x1b[H{text}{status}\x1b[?2026l"
+    return f"\x1b[?2026h{'\x1b[2J' if clear else ''}\x1b[H{text}{status}\x1b[?2026l"
 
 
 def raw_input_mode(fd: int):
@@ -105,10 +109,16 @@ def raw_input_mode(fd: int):
     return old
 
 
-def restore_termios(fd: int, old) -> None:
-    termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    sys.stdout.write("\x1b[?25h\x1b[?1049l")  # show cursor, leave the alternate screen
-    sys.stdout.flush()
+def restore_termios(fd: int, old, out=None) -> None:
+    """Put the terminal back the way it was; never raises. If the terminal is
+    already gone (SIGHUP after the tab closed) the write/tcsetattr fail with
+    OSError, and there is nothing left to restore anyway."""
+    try:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        (out or sys.stdout).write("\x1b[?25h\x1b[?1049l")  # show cursor, leave alt screen
+        (out or sys.stdout).flush()
+    except OSError:
+        pass
 
 
 def default_terminal_size() -> tuple[int, int]:
@@ -118,27 +128,80 @@ def default_terminal_size() -> tuple[int, int]:
             min(MAX_SIZE, max(MIN_SIZE, rows - 1)))
 
 
-def run_viewer(con, map_name: str, camera: tuple[float, float, float], cols: int, rows: int) -> int:
-    """The input loop: re-render only after input changed the camera. Always restores
-    the terminal, including on quit (return 0), Ctrl-C, and exceptions."""
-    fd = sys.stdin.fileno()
+def read_input(fd: int) -> bytes | None:
+    """One raw read of up to 4096 bytes; None on EOF (end of stdin)."""
+    data = os.read(fd, 4096)
+    return data or None
+
+
+def run_viewer(con, map_name: str, camera: tuple[float, float, float], cols: int, rows: int,
+               *, size_locked: bool = False, fd: int | None = None, out=None,
+               reader=read_input) -> int:
+    """The input loop: re-render after input or a terminal resize changed the frame.
+    Always restores the terminal exactly once, including on quit (return 0), EOF,
+    Ctrl-C, exceptions, and SIGTERM/SIGHUP (return 128 + signal number).
+
+    Signals are delivered through a self-pipe: the handlers only write the signal
+    number, and the main loop (selecting on both stdin and the pipe) does all the
+    drawing and restoring, so it never runs inside a signal handler.
+    """
+    fd = sys.stdin.fileno() if fd is None else fd
+    out = sys.stdout if out is None else out
+    pipe_r, pipe_w = os.pipe()
+    os.set_blocking(pipe_w, False)  # a full pipe must never block inside a signal handler
+    handled = (signal.SIGWINCH, signal.SIGTERM, signal.SIGHUP)
+    old_handlers = {sig: signal.getsignal(sig) for sig in handled}
+
+    def on_signal(signum, _frame):
+        try:
+            os.write(pipe_w, bytes([signum]))
+        except OSError:
+            pass
+
+    for sig in handled:
+        signal.signal(sig, on_signal)
     old_termios = raw_input_mode(fd)
+    exit_code: int | None = None
     try:
-        sys.stdout.write("\x1b[?1049h\x1b[?25l")  # alternate screen, hide cursor
-        sys.stdout.write(frame(con, map_name, camera, cols, rows))  # once at start
-        sys.stdout.flush()
-        while True:
-            select.select([sys.stdin], [], [])  # blocks until a key is available
-            actions = parse_keys(os.read(fd, 4096))
-            if "quit" in actions:
-                return 0
-            for action in actions:  # all pending keys, in order
-                camera = step(camera, action)
-            if actions:
-                sys.stdout.write(frame(con, map_name, camera, cols, rows))
-                sys.stdout.flush()
+        out.write("\x1b[?1049h\x1b[?25l")  # alternate screen, hide cursor
+        out.write(frame(con, map_name, camera, cols, rows))  # once at start
+        out.flush()
+        dirty = False
+        while exit_code is None:
+            ready, _, _ = select.select([fd, pipe_r], [], [])
+            if pipe_r in ready:
+                for signum in os.read(pipe_r, 4096):
+                    if signum == signal.SIGWINCH:
+                        if not size_locked:
+                            cols, rows = default_terminal_size()
+                            dirty = True
+                    else:
+                        exit_code = 128 + signum  # SIGTERM -> 143, SIGHUP -> 129
+            if exit_code is None and fd in ready:
+                data = reader(fd)
+                if data is None:
+                    return 0  # EOF on stdin: quit cleanly
+                actions = parse_keys(data)
+                if "quit" in actions:
+                    return 0
+                for action in actions:  # all pending keys, in order
+                    camera = step(camera, action)
+                if actions:
+                    # A resize in the same batch still needs the screen cleared.
+                    out.write(frame(con, map_name, camera, cols, rows, clear=dirty))
+                    out.flush()
+                    dirty = False
+            if exit_code is None and dirty:
+                out.write(frame(con, map_name, camera, cols, rows, clear=True))
+                out.flush()
+                dirty = False
+        return exit_code
     finally:
-        restore_termios(fd, old_termios)
+        restore_termios(fd, old_termios, out)  # exactly once, on every path
+        for sig, handler in old_handlers.items():
+            signal.signal(sig, handler)
+        os.close(pipe_r)
+        os.close(pipe_w)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -151,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--size", type=parse_size, metavar="COLSxROWS",
         help=f"terminal size in characters (default: the terminal size minus one status "
-        f"row), both between {MIN_SIZE} and {MAX_SIZE}",
+        f"row, and the frame follows terminal resizes), both between {MIN_SIZE} and {MAX_SIZE}",
     )
     parser.add_argument(
         "--pos", type=parse_pos, metavar="X,Y",
@@ -186,7 +249,8 @@ def main(argv: list[str] | None = None) -> int:
         px, py = args.pos if args.pos is not None else (player[0], player[1])
         angle = args.angle if args.angle is not None else (player[2] if player else 0.0)
         cols, rows = args.size if args.size else default_terminal_size()
-        return run_viewer(con, map_name, (px, py, angle), cols, rows)
+        return run_viewer(con, map_name, (px, py, angle), cols, rows,
+                          size_locked=args.size is not None)
     finally:
         con.close()
 

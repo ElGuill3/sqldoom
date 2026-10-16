@@ -177,7 +177,9 @@ uv run sqldoom-render doom1.duckdb E1M1 --pos 1056,-3200 --angle 45 -o window.pn
 
 The viewer needs a terminal with 24-bit color, such as WezTerm or Windows Terminal. Keys: `w`/`s` or Up/Down move
 16 units, `a`/`d` or Left/Right turn 7.5 degrees, `q`/Esc quits. There are no collisions yet (Part 5), so you can
-walk through walls. The status line shows the position, angle and frames per second.
+walk through walls. The status line shows the position, angle and frames per second. Without `--size` the frame
+follows terminal resizes (drag the window edge and it redraws at the new size), and the terminal is restored even
+if the viewer is killed with SIGTERM or SIGHUP (for example by closing the tab).
 
 ```
 usage: sqldoom-render [-h] [--size WxH] [--pos X,Y] [--angle DEG] [-o OUTPUT] database map
@@ -186,7 +188,8 @@ usage: sqldoom-view [-h] [--size COLSxROWS] [--pos X,Y] [--angle DEG] database m
 
 - Without `--pos`/`--angle` the camera is the player 1 start.
 - `--size` counts characters for terminal output (one character = 2 pixels stacked) and pixels for PNG. Both values
-  must be between 8 and 4096. The viewer defaults to the terminal size.
+  must be between 8 and 4096. The viewer defaults to the terminal size (minus one status row) and, without
+  `--size`, keeps following terminal resizes.
 - Errors are the automap ones, plus `error: map has no player start: <MAP>` and
   `error: sqldoom-view needs an interactive terminal`.
 
