@@ -151,6 +151,106 @@ def test_point_sector_without_nodes_is_subsector_zero(tmp):
     assert render_query(db, "SELECT sector FROM point_sector('E1M1', 100, -50)") == [(0,)]
 
 
+# --- T3: render_ansi (D8) ---------------------------------------------------
+
+
+def pixel_grid(db, px, py, angle, cols, rows) -> list[list[tuple]]:
+    """The render_pixels colors render_ansi encodes: grid[y][x] = (r, g, b)."""
+    cells = render_query(
+        db,
+        f"SELECT x, y, r, g, b FROM render_pixels('E1M1', {px}, {py}, {angle}, {cols}, {rows * 2}) ORDER BY y, x",
+    )
+    return [[cell[2:] for cell in cells[y * cols:(y + 1) * cols]] for y in range(rows * 2)]
+
+
+def expected_frame(grid: list[list[tuple]], cols: int, rows: int) -> str:
+    """Encode the grid per D8: one text row per pixel-row pair, fg then bg codes only
+    when the color differs from the previous cell (always on the first cell), ESC[0m
+    and a newline at the end of every row."""
+    lines = []
+    for tr in range(rows):
+        prev_fg = prev_bg = None
+        parts = []
+        for x in range(cols):
+            fg, bg = grid[2 * tr][x], grid[2 * tr + 1][x]
+            if fg != prev_fg:
+                parts.append(f"\x1b[38;2;{fg[0]};{fg[1]};{fg[2]}m")
+            if bg != prev_bg:
+                parts.append(f"\x1b[48;2;{bg[0]};{bg[1]};{bg[2]}m")
+            parts.append("▀")
+            prev_fg, prev_bg = fg, bg
+        parts.append("\x1b[0m\n")
+        lines.append("".join(parts))
+    return "".join(lines)
+
+
+def decode_frame(text: str) -> list[list[tuple]]:
+    """Decode D8 rows back to pixels: each ▀ cell contributes fg = top, bg = bottom."""
+    grid = []
+    fg = bg = (0, 0, 0)
+    for line in text.splitlines():
+        top, bottom = [], []
+        i = 0
+        while i < len(line):
+            if line[i] == "\x1b":
+                end = line.index("m", i)
+                params = line[i + 2:end].split(";")
+                if params[0] == "38":
+                    fg = tuple(int(p) for p in params[2:5])
+                elif params[0] == "48":
+                    bg = tuple(int(p) for p in params[2:5])
+                else:
+                    assert params[0] == "0"  # the row-ending reset
+                i = end + 1
+            else:
+                assert line[i] == "▀"
+                top.append(fg)
+                bottom.append(bg)
+                i += 1
+        grid.append(top)
+        grid.append(bottom)
+    return grid
+
+
+def test_render_ansi_matches_the_d8_encoding_exactly(tmp):
+    # angle 30 makes wall depth (and so color) vary per column, so mid-row code
+    # changes are exercised, not just first-cell codes.
+    db = make_db(tmp, corridor_map_lumps())
+
+    text = render_query(db, "SELECT text FROM render_ansi('E1M1', 0, 0, 30, 16, 5)")[0][0]
+
+    lines = text.splitlines()
+    assert len(lines) == 5
+    assert text.endswith("\x1b[0m\n")
+    assert all(line.startswith("\x1b[38;2;") for line in lines)  # first cell always coded
+    assert any(line.count("\x1b[38;2;") > 1 for line in lines)  # a mid-row fg change
+    assert any(line.count("\x1b[48;2;") > 1 for line in lines)  # a mid-row bg change
+    assert text == expected_frame(pixel_grid(db, 0, 0, 30, 16, 5), 16, 5)
+
+
+def test_render_ansi_emits_no_repeated_codes_when_colors_repeat(tmp):
+    # The uniform corridor at angle 0: every column of a row has the same colors.
+    db = make_db(tmp, corridor_map_lumps())
+
+    text = render_query(db, "SELECT text FROM render_ansi('E1M1', 0, 0, 0, 16, 5)")[0][0]
+
+    assert text.count("\x1b[38;2;") == 5  # exactly one fg code per text row
+    assert text.count("\x1b[48;2;") == 5  # exactly one bg code per text row
+    assert text == expected_frame(pixel_grid(db, 0, 0, 0, 16, 5), 16, 5)
+
+
+def test_render_ansi_decodes_back_to_every_pixel(tmp):
+    db = make_db(tmp, corridor_map_lumps())
+
+    text = render_query(db, "SELECT text FROM render_ansi('E1M1', 0, 0, 30, 16, 5)")[0][0]
+
+    grid, decoded = pixel_grid(db, 0, 0, 30, 16, 5), decode_frame(text)
+    assert len(decoded) == 10
+    for y in range(10):
+        for x in range(16):
+            assert decoded[y][x] == grid[y][x]
+
+
 # --- T2: render_pixels ------------------------------------------------------
 
 

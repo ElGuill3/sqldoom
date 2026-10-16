@@ -228,6 +228,46 @@ FROM generate_series(0, width - 1) x(c)
 CROSS JOIN generate_series(0, height - 1) y(y)
 LEFT JOIN best ON best.c = x.c AND best.y = y.y;
 
+-- T3 (D8): the same framebuffer as a terminal frame: the view rendered at cols x
+-- rows*2 pixels, two pixel rows packed into one text row of ▀ cells (foreground =
+-- top pixel, background = bottom pixel). 24-bit SGR codes are emitted only when the
+-- color differs from the previous cell in the same text row (always on the first
+-- cell, where lag() has nothing to compare); every row ends with ESC[0m and \n.
+CREATE OR REPLACE TEMP MACRO render_ansi(map_name, px, py, angle, cols, rows) AS TABLE
+WITH pair AS (
+    -- Pixel rows y = 2*t and 2*t + 1 become text row t.
+    SELECT y // 2 AS text_row, x,
+           max(r) FILTER (WHERE y % 2 = 0) AS fr,
+           max(g) FILTER (WHERE y % 2 = 0) AS fgn,
+           max(b) FILTER (WHERE y % 2 = 0) AS fb,
+           max(r) FILTER (WHERE y % 2 = 1) AS br,
+           max(g) FILTER (WHERE y % 2 = 1) AS bgn,
+           max(b) FILTER (WHERE y % 2 = 1) AS bb
+    FROM render_pixels(map_name, px, py, angle, cols, rows * 2)
+    GROUP BY y // 2, x
+),
+cells AS (
+    -- D8: emit an SGR code only when this cell differs from the previous one.
+    SELECT text_row, x,
+           CASE WHEN x = 0
+                     OR fr <> lag(fr) OVER w OR fgn <> lag(fgn) OVER w OR fb <> lag(fb) OVER w
+                THEN chr(27) || '[38;2;' || fr || ';' || fgn || ';' || fb || 'm'
+                ELSE '' END AS fg_code,
+           CASE WHEN x = 0
+                     OR br <> lag(br) OVER w OR bgn <> lag(bgn) OVER w OR bb <> lag(bb) OVER w
+                THEN chr(27) || '[48;2;' || br || ';' || bgn || ';' || bb || 'm'
+                ELSE '' END AS bg_code
+    FROM pair
+    WINDOW w AS (PARTITION BY text_row ORDER BY x)
+),
+lines AS (
+    SELECT text_row, string_agg(fg_code || bg_code || '▀', '' ORDER BY x) AS line
+    FROM cells
+    GROUP BY text_row
+)
+SELECT string_agg(line || chr(27) || '[0m' || chr(10), '' ORDER BY text_row) AS text
+FROM lines;
+
 -- T2: the same framebuffer as one row-major RGB BLOB, like automap_rgb.
 CREATE OR REPLACE TEMP MACRO render_rgb(map_name, px, py, angle, width, height) AS TABLE
 SELECT unhex(string_agg(

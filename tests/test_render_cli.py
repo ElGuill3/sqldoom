@@ -131,14 +131,38 @@ def test_rejects_bad_size(tmp, size):
     )
 
 
-def test_output_is_required(tmp):
+def test_without_output_prints_one_ansi_frame(tmp):
     db = make_db(tmp)
 
-    result = run_render(db, "E1M1")
+    result = run_render(db, "E1M1", "--size", "16x8", "--pos", "0,0", "--angle", "0")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    expected = render_query(db, "SELECT text FROM render_ansi('E1M1', 0, 0, 0, 16, 8)")[0][0]
+    assert result.stdout == expected
+
+
+def test_terminal_default_size_is_160x50(tmp):
+    db = make_db(tmp)
+
+    result = run_render(db, "E1M1", "--pos", "0,0", "--angle", "0")
+
+    assert result.returncode == 0, result.stderr
+    expected = render_query(db, "SELECT text FROM render_ansi('E1M1', 0, 0, 0, 160, 50)")[0][0]
+    assert result.stdout == expected
+    assert result.stdout.count("\n") == 50
+
+
+def test_terminal_size_bounds_are_enforced(tmp):
+    db = make_db(tmp)
+
+    result = run_render(db, "E1M1", "--size", "3x3")
 
     assert result.returncode == 2
     assert result.stdout == ""
-    assert result.stderr.endswith("sqldoom-render: error: the following arguments are required: -o/--output\n")
+    assert result.stderr.endswith(
+        "sqldoom-render: error: argument --size: expected WIDTHxHEIGHT, both between 8 and 4096, got '3x3'\n"
+    )
 
 
 @pytest.mark.parametrize("pos", ["10", "a,b", "1,2,3"])
