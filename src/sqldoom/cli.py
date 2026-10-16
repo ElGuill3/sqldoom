@@ -8,6 +8,7 @@ from pathlib import Path
 import duckdb
 
 from . import db
+from .maps import decode_map
 from .wad import CorruptWad, NotAWad, find_maps, read_lumps
 
 
@@ -34,6 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     # Parse everything before touching the target, so bad input never leaves a database behind.
     try:
         lumps = read_lumps(args.wad.read_bytes())
+        maps = [decode_map(lumps, marker) for marker in find_maps(lumps)]
     except NotAWad:
         return fail(f"not a WAD file: {args.wad}")
     except CorruptWad:
@@ -44,12 +46,12 @@ def main(argv: list[str] | None = None) -> int:
     scratch.unlink(missing_ok=True)
     try:
         with duckdb.connect(str(scratch)) as con:
-            db.load(con, lumps)
+            db.load(con, lumps, maps)
         os.replace(scratch, args.database)
     finally:
         scratch.unlink(missing_ok=True)
 
-    print(f"imported {len(lumps)} lumps and {len(find_maps(lumps))} maps into {args.database}")
+    print(f"imported {len(lumps)} lumps and {len(maps)} maps into {args.database}")
     return 0
 
 
