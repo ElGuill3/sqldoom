@@ -26,6 +26,49 @@ def write_wad(path: Path, lumps: list[tuple[str, bytes]], magic: bytes = b"IWAD"
     return path
 
 
+def map_lumps(marker, vertexes, linedefs, sidedefs, sectors, things) -> list[tuple[str, bytes]]:
+    """A map from plain tuples; BSP lumps are left empty (the automap does not need them).
+
+    linedefs: (v1, v2, front_sidedef, back_sidedef or None); sidedefs: sector per side;
+    sectors: (floor_height, ceiling_height); things: (x, y, type).
+    """
+    return [
+        (marker, b""),
+        ("THINGS", b"".join(struct.pack("<5h", x, y, 90, t, 7) for x, y, t in things)),
+        ("LINEDEFS", b"".join(
+            struct.pack("<HHhhhHH", a, b, 0, 0, 0, front, 0xFFFF if back is None else back)
+            for a, b, front, back in linedefs
+        )),
+        ("SIDEDEFS", b"".join(
+            struct.pack("<hh", 0, 0) + name8("-") * 3 + struct.pack("<H", s) for s in sidedefs
+        )),
+        ("VERTEXES", b"".join(struct.pack("<2h", x, y) for x, y in vertexes)),
+        ("SEGS", b""),
+        ("SSECTORS", b""),
+        ("NODES", b""),
+        ("SECTORS", b"".join(
+            struct.pack("<hh", f, c) + name8("FLOOR4_8") + name8("CEIL3_5") + struct.pack("<hhh", 160, 0, 0)
+            for f, c in sectors
+        )),
+    ]
+
+
+def room_map_lumps(marker: str = "E1M1", right_floor: int = 0, right_ceiling: int = 128):
+    """A 180x160 room split at x=90 by a two-sided line into two sectors.
+
+    The left sector has floor 0 / ceiling 128; the right one uses the given heights.
+    Player 1 starts at (40, 80); an imp (type 3004) stands at (135, 80).
+    """
+    return map_lumps(
+        marker,
+        vertexes=[(0, 0), (180, 0), (180, 160), (0, 160), (90, 0), (90, 160)],
+        linedefs=[(0, 1, 0, None), (1, 2, 0, None), (2, 3, 0, None), (3, 0, 0, None), (4, 5, 1, 2)],
+        sidedefs=[0, 0, 1],
+        sectors=[(0, 128), (right_floor, right_ceiling)],
+        things=[(40, 80, 1), (135, 80, 3004)],
+    )
+
+
 def sample_map_lumps(marker: str = "E1M1") -> list[tuple[str, bytes]]:
     """One small map: a square room split by one BSP node into two subsectors."""
     things = struct.pack("<5h", 64, 96, 90, 1, 7) + struct.pack("<5h", -32, 16, 270, 3004, 4)

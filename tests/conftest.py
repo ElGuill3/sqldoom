@@ -6,12 +6,20 @@ import duckdb
 import pytest
 
 
-def run_import(*args: str) -> subprocess.CompletedProcess:
+def run_module(module: str, *args, text: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, "-m", "sqldoom.cli", *map(str, args)],
+        [sys.executable, "-m", module, *map(str, args)],
         capture_output=True,
-        text=True,
+        text=text,
     )
+
+
+def run_import(*args) -> subprocess.CompletedProcess:
+    return run_module("sqldoom.cli", *args)
+
+
+def run_automap(*args, text: bool = True) -> subprocess.CompletedProcess:
+    return run_module("sqldoom.automap", *args, text=text)
 
 
 def query(db: Path, sql: str) -> list[tuple]:
