@@ -223,9 +223,23 @@ SQL returns.
 
 ### Performance
 
-Measured in WSL2 on the development machine, E1M1 from the player start renders in ~110 ms at 160x100 pixels (the default terminal frame,
-about 9 fps) and ~160 ms at 320x200. A terminal frame is about 44 KB of text. Part 4 will need to find speed before it
-adds textures.
+Measured in WSL2 on the development machine, E1M1 from the player start renders a default terminal frame (160x50
+characters = 160x100 pixels) in ~33 ms, about 30 fps, on an idle machine; E1M6 takes ~41 ms. A terminal frame is
+about 44 KB of text. Loading `render.sql` costs ~100-150 ms once per connection.
+
+The first version needed ~80 ms per frame. A per-CTE profile (cut the CTE chain after each stage and time a
+`count(*)`) showed that most of the time went into recomputing data that never changes, so the renderer now:
+
+- answers "which sector am I in?" from precomputed BSP paths: each subsector is the intersection of the half-planes on
+  its path from the root, so the lookup is a `GROUP BY subsector HAVING bool_and(test)` instead of a recursive walk;
+- keeps line geometry, both sides' sector data and the texture colors in `TEMP` tables built once per connection
+  (the database schema is unchanged);
+- drops walls entirely behind the camera before the column x wall cross join. This is exact: if both endpoints are
+  closer than the near plane, no ray can hit the wall;
+- resolves pixels and terminal cells with aggregates instead of window functions.
+
+Measured side by side on the same busy machine, the speedup is ~2.6x for terminal frames and ~1.9x for 320x200 PNGs,
+and every frame is byte-identical to the first version (golden hashes and differential checks).
 
 ## Tests
 
