@@ -72,6 +72,28 @@ def test_default_png_size_is_640x400(tmp):
     assert read_png(out.read_bytes())[:2] == (640, 400)
 
 
+def test_accepts_size_4096x8(tmp):
+    db, out = make_db(tmp), tmp / "map.png"
+
+    result = run_automap(db, "E1M1", "--size", "4096x8", "-o", out)
+
+    assert result.returncode == 0
+    assert result.stdout == f"wrote {out} (4096x8)\n"
+    assert read_png(out.read_bytes())[:2] == (4096, 8)
+
+
+def test_cannot_write_png_to_missing_directory(tmp):
+    db = make_db(tmp)
+    out = tmp / "no-such-dir" / "map.png"
+
+    result = run_automap(db, "E1M1", "-o", out)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == f"error: cannot write {out}: No such file or directory\n"
+    assert not out.exists()
+
+
 def test_unknown_map_writes_no_file(tmp):
     db, out = make_db(tmp), tmp / "map.png"
 

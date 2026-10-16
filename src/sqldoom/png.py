@@ -19,6 +19,10 @@ def encode_rgb(width: int, height: int, rgb: bytes) -> bytes:
     stride = width * 3
     if len(rgb) != stride * height:
         raise ValueError(f"expected {stride * height} bytes for {width}x{height} RGB, got {len(rgb)}")
-    rows = b"".join(b"\0" + rgb[y * stride : (y + 1) * stride] for y in range(height))
+    # Every row is prefixed with a filter byte; 0 = no filter.
+    rows = bytearray()
+    for y in range(height):
+        rows += b"\0"
+        rows += rgb[y * stride : (y + 1) * stride]
     header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)  # 8-bit depth, truecolor RGB
     return SIGNATURE + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b"")

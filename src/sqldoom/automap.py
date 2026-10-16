@@ -16,12 +16,13 @@ from .png import encode_rgb
 
 ASCII_SIZE = (120, 60)
 PNG_SIZE = (640, 400)
+MIN_SIZE, MAX_SIZE = 8, 4096
 
 
 def parse_size(value: str) -> tuple[int, int]:
     match = re.fullmatch(r"(\d+)x(\d+)", value)
-    if not match or min(int(match[1]), int(match[2])) < 8:
-        raise argparse.ArgumentTypeError(f"expected WIDTHxHEIGHT, both at least 8, got '{value}'")
+    if not match or not (MIN_SIZE <= int(match[1]) <= MAX_SIZE and MIN_SIZE <= int(match[2]) <= MAX_SIZE):
+        raise argparse.ArgumentTypeError(f"expected WIDTHxHEIGHT, both between 8 and 4096, got '{value}'")
     return int(match[1]), int(match[2])
 
 
@@ -40,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--size", type=parse_size, metavar="WxH",
         help=f"output size: characters for ASCII (default {ASCII_SIZE[0]}x{ASCII_SIZE[1]}), "
-        f"pixels for PNG (default {PNG_SIZE[0]}x{PNG_SIZE[1]})",
+        f"pixels for PNG (default {PNG_SIZE[0]}x{PNG_SIZE[1]}), both between {MIN_SIZE} and {MAX_SIZE}",
     )
     parser.add_argument("-o", "--output", type=Path, help="write a PNG image here instead of printing ASCII")
     args = parser.parse_args(argv)
@@ -49,8 +50,18 @@ def main(argv: list[str] | None = None) -> int:
     if not args.database.is_file():
         return fail(f"file not found: {args.database}")
 
-    with duckdb.connect(str(args.database), read_only=True) as con:
-        if not con.execute("SELECT 1 FROM maps WHERE name = ?", [map_name]).fetchone():
+    # Only opening the file and finding the maps table can mean "wrong database"; errors past
+    # that point are renderer bugs and must surface as such, not as a misleading message.
+    try:
+        con = duckdb.connect(str(args.database), read_only=True)
+        map_found = con.execute("SELECT 1 FROM maps WHERE name = ?", [map_name]).fetchone()
+    except duckdb.Error:
+        if "con" in locals():
+            con.close()
+        return fail(f"not a sqldoom database: {args.database}")
+
+    with con:
+        if not map_found:
             return fail(f"map not found: {map_name}")
         con.execute(files("sqldoom").joinpath("sql/automap.sql").read_text())
         if args.output is None:
@@ -63,7 +74,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.output is None:
         sys.stdout.write(text)
     else:
-        args.output.write_bytes(encode_rgb(width, height, rgb))
+        try:
+            args.output.write_bytes(encode_rgb(width, height, rgb))
+        except OSError as exc:
+            return fail(f"cannot write {args.output}: {exc.strerror}")
         print(f"wrote {args.output} ({width}x{height})")
     return 0
 

@@ -2,9 +2,13 @@
 --
 -- Pipeline (one CTE per step):
 --   bounds       -> bounding box of the map's vertexes
---   frame        -> one scale factor that fits the box into the screen, keeping proportions
+--   frame        -> the usable area (1 pixel margin on each side)
+--   scale        -> one scale factor that fits the box into the screen, keeping proportions
+--   transform    -> the centering padding shared by walls and player:
+--                   sx = 1 + (x - min_x) * scale + x_pad, sy = 1 + (max_y - y) * scale / aspect + y_pad
 --   walls        -> every linedef with world coordinates and an automap kind
 --   screen_walls -> the same lines in pixel coordinates
+--   dda_lines    -> each line plus its DDA step count n
 --   line_pixels  -> rasterization: each line becomes one row per pixel it covers
 --   player       -> the player 1 start as a small cross
 --   best         -> where several things cover one pixel, the highest priority wins
@@ -21,13 +25,24 @@ bounds AS (
     WHERE map = map_name
 ),
 frame AS (
-    -- 1 pixel margin on each side; the usable area is centered.
-    SELECT *,
-           width - 3 AS usable_w,
-           height - 3 AS usable_h,
-           least((width - 3) / greatest(max_x - min_x, 1),
-                 (height - 3) * aspect / greatest(max_y - min_y, 1)) AS scale
+    -- 1 pixel margin on each side; the usable area is width-3 x height-3, centered.
+    SELECT *, width - 3 AS usable_w, height - 3 AS usable_h
     FROM bounds
+),
+scale AS (
+    -- One scale for both axes keeps proportions; the tighter axis wins.
+    SELECT *, least(usable_w / greatest(max_x - min_x, 1),
+                    usable_h * aspect / greatest(max_y - min_y, 1)) AS scale
+    FROM frame
+),
+transform AS (
+    -- Padding that centers the scaled map, computed once for walls and player:
+    -- sx = 1 + (x - min_x) * scale + x_pad, sy = 1 + (max_y - y) * scale / aspect + y_pad.
+    -- Keep this exact operation order: an algebraically equal form (x_offset + x * scale)
+    -- rounds differently at .5 pixel boundaries and moved pixels on E1M1 and E1M3.
+    SELECT *, (usable_w - (max_x - min_x) * scale) / 2 AS x_pad,
+              (usable_h - (max_y - min_y) * scale / aspect) / 2 AS y_pad
+    FROM scale
 ),
 walls AS (
     SELECT CASE
@@ -48,29 +63,31 @@ walls AS (
 ),
 screen_walls AS (
     SELECT kind,
-           1 + (x1 - min_x) * scale + (usable_w - (max_x - min_x) * scale) / 2 AS sx1,
-           1 + (max_y - y1) * scale / aspect + (usable_h - (max_y - min_y) * scale / aspect) / 2 AS sy1,
-           1 + (x2 - min_x) * scale + (usable_w - (max_x - min_x) * scale) / 2 AS sx2,
-           1 + (max_y - y2) * scale / aspect + (usable_h - (max_y - min_y) * scale / aspect) / 2 AS sy2
-    FROM walls, frame
+           1 + (x1 - min_x) * scale + x_pad AS sx1,
+           1 + (max_y - y1) * scale / aspect + y_pad AS sy1,
+           1 + (x2 - min_x) * scale + x_pad AS sx2,
+           1 + (max_y - y2) * scale / aspect + y_pad AS sy2
+    FROM walls, transform
+),
+dda_lines AS (
+    -- n is the DDA step count: max(|dx|, |dy|) rounded up, at least 1.
+    SELECT *, greatest(CAST(ceil(greatest(abs(sx2 - sx1), abs(sy2 - sy1))) AS BIGINT), 1) AS n
+    FROM screen_walls
 ),
 line_pixels AS (
-    -- DDA: walk max(|dx|, |dy|) steps along the line, one pixel per step.
-    -- generate_series in a LATERAL join is SQL's loop: it fans each line out into rows.
+    -- generate_series in a LATERAL join is SQL's loop: it fans each line out into n + 1 pixel rows.
     SELECT kind,
            CAST(round(sx1 + (sx2 - sx1) * t / n) AS INTEGER) AS x,
            CAST(round(sy1 + (sy2 - sy1) * t / n) AS INTEGER) AS y
-    FROM (SELECT *, greatest(CAST(ceil(greatest(abs(sx2 - sx1), abs(sy2 - sy1))) AS BIGINT), 1) AS n
-          FROM screen_walls) w,
+    FROM dda_lines,
          LATERAL generate_series(0, n) AS s(t)
 ),
 player AS (
     -- A cross of radius width // 160: a single pixel in a terminal, visible in a 640 px image.
     SELECT 'player' AS kind, p.x + dx AS x, p.y + dy AS y
-    FROM (SELECT CAST(round(1 + (t.x - min_x) * scale + (usable_w - (max_x - min_x) * scale) / 2) AS INTEGER) AS x,
-                 CAST(round(1 + (max_y - t.y) * scale / aspect
-                            + (usable_h - (max_y - min_y) * scale / aspect) / 2) AS INTEGER) AS y
-          FROM things t, frame
+    FROM (SELECT CAST(round(1 + (t.x - min_x) * scale + x_pad) AS INTEGER) AS x,
+                 CAST(round(1 + (max_y - t.y) * scale / aspect + y_pad) AS INTEGER) AS y
+          FROM things t, transform
           WHERE t.map = map_name AND t.type = 1) p,
          LATERAL (SELECT d AS dx, 0 AS dy FROM generate_series(-(width // 160), width // 160) g(d)
                   UNION ALL

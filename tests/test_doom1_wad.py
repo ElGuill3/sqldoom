@@ -3,12 +3,13 @@
 Set SQLDOOM_WAD to point elsewhere; default is wad/doom1.wad (see README).
 """
 
+import hashlib
 import os
 from pathlib import Path
 
 import pytest
 
-from conftest import query, run_import
+from conftest import query, run_automap, run_import
 
 WAD = Path(os.environ.get("SQLDOOM_WAD", Path(__file__).parent.parent / "wad" / "doom1.wad"))
 
@@ -76,3 +77,25 @@ def test_bsp_tree_has_one_more_leaf_than_nodes(db):
 @pytest.mark.parametrize("check", ORPHANS)
 def test_cross_references_resolve(db, check):
     assert query(db, ORPHANS[check]) == []
+
+
+# Golden fingerprints of real automap output. A refactor of the screen transform once moved
+# single pixels here (floating point rounding at .5 boundaries); these pin the exact output.
+def test_automap_ascii_output_is_stable(db):
+    result = run_automap(db, "E1M3", "--size", "150x70", text=False)
+
+    assert result.returncode == 0
+    assert hashlib.sha256(result.stdout).hexdigest() == (
+        "f1522c7b0620d41e836e0a86f84eb5b9e41be749da98e659af8817d9a4718c92"
+    )
+
+
+def test_automap_png_output_is_stable(db, tmp_path):
+    out = tmp_path / "e1m1.png"
+
+    result = run_automap(db, "E1M1", "-o", out)
+
+    assert result.returncode == 0
+    assert hashlib.sha256(out.read_bytes()).hexdigest() == (
+        "afce18bbcf4343affb0d14ab6d2d33f01eba0daed9c8413f97f8d210ad55be27"
+    )

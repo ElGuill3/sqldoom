@@ -6,6 +6,7 @@ so the room's walls land on columns 1..19 and rows 1..9, the split line on colum
 and the player start (40, 80) on column 5, row 5.
 """
 
+import duckdb
 import pytest
 
 from conftest import query, run_automap, run_import
@@ -89,7 +90,7 @@ def test_missing_database(tmp):
     assert not missing.exists()
 
 
-@pytest.mark.parametrize("size", ["3x3", "21", "axb", "21x7"])
+@pytest.mark.parametrize("size", ["3x3", "21", "axb", "21x7", "4097x8", "8x5000"])
 def test_rejects_bad_size(tmp, size):
     db = make_db(tmp)
 
@@ -98,5 +99,31 @@ def test_rejects_bad_size(tmp, size):
     assert result.returncode == 2
     assert result.stdout == ""
     assert result.stderr.endswith(
-        f"sqldoom-automap: error: argument --size: expected WIDTHxHEIGHT, both at least 8, got '{size}'\n"
+        f"sqldoom-automap: error: argument --size: expected WIDTHxHEIGHT, both between 8 and 4096, got '{size}'\n"
     )
+
+
+def test_not_a_sqldoom_database(tmp):
+    junk = tmp / "junk.duckdb"
+    junk.write_bytes(b"junk bytes, definitely not a DuckDB file\n" * 4)
+    before = junk.read_bytes()
+
+    result = run_automap(junk, "E1M1")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == f"error: not a sqldoom database: {junk}\n"
+    assert junk.read_bytes() == before  # opened read-only, byte-identical
+
+
+def test_empty_duckdb_file_has_no_maps(tmp):
+    empty = tmp / "empty.duckdb"
+    duckdb.connect(str(empty)).close()
+    before = empty.read_bytes()
+
+    result = run_automap(empty, "E1M1", "--size", "21x11")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == f"error: not a sqldoom database: {empty}\n"
+    assert empty.read_bytes() == before  # opened read-only, byte-identical

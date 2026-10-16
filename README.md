@@ -120,11 +120,12 @@ uv run sqldoom-automap doom1.duckdb e1m6 --size 200x90 # map names are case-inse
 usage: sqldoom-automap [-h] [--size WxH] [-o OUTPUT] database map
 ```
 
-- `--size WxH`: characters for ASCII, pixels for PNG. Both values must be at least 8.
+- `--size WxH`: characters for ASCII, pixels for PNG. Both values must be between 8 and 4096.
 - `-o OUTPUT`: write a PNG instead of printing ASCII. Prints `wrote <path> (WxH)`.
 
-Errors exit with code 1 and leave no output file: `error: file not found: <path>` and
-`error: map not found: <MAP>`. An invalid `--size` is a usage error (exit code 2).
+Errors exit with code 1 and leave no output file: `error: file not found: <path>`, `error: map not found: <MAP>`,
+`error: not a sqldoom database: <path>` and `error: cannot write <path>: <strerror>`. An invalid `--size` is a
+usage error (exit code 2).
 
 | Line kind | Rule | ASCII | PNG |
 |-----------|------|-------|-----|
