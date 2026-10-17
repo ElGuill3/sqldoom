@@ -287,6 +287,33 @@ Textures moved a default terminal frame of E1M1 from ~39 ms to ~48-50 ms on this
 text grew from ~44 KB to ~148 KB, because textured cells change color almost every cell and the ANSI encoder can no
 longer skip codes. Both are the next optimization targets.
 
+### Measuring your machine
+
+`sqldoom-bench` separates the two costs of the viewer: the SQL that computes a frame and the terminal that has to
+display it. Run it in the terminal you play in:
+
+```sh
+uv run sqldoom-bench doom1.duckdb E1M1                 # 160x50 frame, 20 timed frames
+uv run sqldoom-bench doom1.duckdb E1M1 --size 120x40 --frames 50
+```
+
+```
+map E1M1  size 160x50 (160x100 pixels)  frames 20
+load render.sql     114.6 ms
+sql per frame       avg 49.2 ms  min 46.2  max 55.3  (20.3 fps)
+terminal per frame  skipped (stdout is not a terminal)
+viewer estimate     20.3 fps (sql only)
+duckdb threads      8 (cpu count 8)
+```
+
+That run had stdout redirected. In a real terminal the fourth line becomes
+`terminal per frame  avg <ms> ms  min <ms>  max <ms>  (<bytes> bytes)` and the estimate adds both costs. The
+terminal line flashes the frame on the alternate screen and waits (`tcdrain`) until the terminal has read it.
+When stdout is not a terminal (a pipe or a file) it says `skipped` and the estimate counts SQL only. If `sql per frame`
+dominates, the renderer is the bottleneck; if `terminal per frame` does, the frame text is. DuckDB spreads each query
+over its threads, so machines with fewer cores lose more. `--frames` accepts 1 to 1000; `--size`, `--pos` and
+`--angle` work like in `sqldoom-render`.
+
 ## Tests
 
 ```sh

@@ -10,6 +10,7 @@ sqldoom-import = "sqldoom.cli:main"
 sqldoom-automap = "sqldoom.automap:main"
 sqldoom-render = "sqldoom.render:main"
 sqldoom-view = "sqldoom.view:main"
+sqldoom-bench = "sqldoom.bench:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
