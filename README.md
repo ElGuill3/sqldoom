@@ -85,6 +85,9 @@ Every map table is keyed by `(map, id)`, where `id` is the record's index in its
 | `textures` | composite wall texture | `width`, `height` |
 | `texture_columns` | texture column `u`, `pixels` being its palette indices (one per texel row) | `u`, `pixels` |
 | `flats` | floor/ceiling texture (64x64) | `pixels` (palette indices, row-major) |
+| `sprites` | non-empty picture lump between `S_START` and `S_END` | `name`, `width`, `height`, `left_offset`, `top_offset` |
+| `sprite_columns` | sprite column, keyed by `(sprite, u)` | `pixels` (height palette indices; NULL texels are transparent) |
+| `thing_types` | shareware thing type's spawn state (Doom's info.c) | `type`, `sprite`, `frame`, `full_bright` |
 
 ### Exploring it
 

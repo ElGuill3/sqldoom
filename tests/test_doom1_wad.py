@@ -5,6 +5,7 @@ Set SQLDOOM_WAD to point elsewhere; default is wad/doom1.wad (see README).
 
 import hashlib
 import os
+import struct
 from pathlib import Path
 
 import pytest
@@ -158,6 +159,45 @@ def test_point_sector_matches_a_python_d5_walk_on_every_map_and_vertex(db):
         sector_at = reference_walk(db, map_name)
         for point in points:
             assert got[point] == sector_at(*point), (map_name, point)
+
+
+# Part 4b: imported sprites (rendering is a separate task).
+
+
+def test_sprite_namespace_count_and_dimensions(db):
+    from sqldoom.wad import read_lumps
+
+    lumps = read_lumps(WAD.read_bytes())
+    names = [lump.name for lump in lumps]
+    sprites = [lump for lump in lumps[names.index("S_START") + 1:names.index("S_END")] if lump.size]
+    assert len(sprites) == 483
+    assert query(db, "SELECT count(*) FROM sprites") == [(len(sprites),)]
+    for name in ("TROOA2A8", "BAR1A0"):
+        lump = next(lump for lump in sprites if lump.name == name)
+        assert query(db, f"SELECT width, height, left_offset, top_offset FROM sprites WHERE name = '{name}'") == [
+            struct.unpack_from("<4h", lump.data)
+        ]
+    assert query(db, "SELECT width, height FROM sprites WHERE name = 'TROOA2A8'") == [(40, 55)]
+    assert query(db, "SELECT width, height FROM sprites WHERE name = 'BAR1A0'") == [(23, 32)]
+
+
+def test_sprite_columns_cover_every_width(db):
+    assert query(db, "SELECT sum(width) FROM sprites") == query(db, "SELECT count(*) FROM sprite_columns")
+    assert query(db, """
+        SELECT sprite, u FROM sprite_columns c JOIN sprites s ON c.sprite = s.name
+        WHERE len(pixels) <> height OR u < 0 OR u >= width
+    """) == []
+
+
+def test_spawn_states_have_sprites_and_cover_map_things(db):
+    assert query(db, """
+        SELECT type FROM thing_types t WHERE NOT EXISTS (
+            SELECT 1 FROM sprites s WHERE starts_with(s.name, t.sprite || t.frame))
+    """) == []
+    assert query(db, """
+        SELECT DISTINCT type FROM things
+        WHERE type NOT IN (SELECT type FROM thing_types) AND type NOT IN (1, 2, 3, 4, 11, 14)
+    """) == []
 
 
 # Golden fingerprints of real automap output. A refactor of the screen transform once moved

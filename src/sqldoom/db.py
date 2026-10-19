@@ -17,6 +17,7 @@ import duckdb
 
 from .graphics import Graphics
 from .maps import FORMATS, MapData
+from .things import THING_TYPES
 from .wad import Lump
 
 SCHEMA = """
@@ -58,6 +59,28 @@ CREATE TABLE texture_columns (
     PRIMARY KEY (texture, u)
 );
 
+CREATE TABLE sprites (
+    name        VARCHAR PRIMARY KEY,
+    width       INTEGER NOT NULL,
+    height      INTEGER NOT NULL,
+    left_offset INTEGER NOT NULL,
+    top_offset  INTEGER NOT NULL
+);
+
+CREATE TABLE sprite_columns (
+    sprite VARCHAR NOT NULL REFERENCES sprites (name),
+    u      INTEGER NOT NULL,
+    pixels UTINYINT[] NOT NULL,  -- one per texel row; NULL elements are transparent
+    PRIMARY KEY (sprite, u)
+);
+
+CREATE TABLE thing_types (
+    type        INTEGER PRIMARY KEY,
+    sprite      VARCHAR(4) NOT NULL,
+    frame       VARCHAR(1) NOT NULL,
+    full_bright BOOLEAN NOT NULL
+);
+
 CREATE TABLE flats (
     name   VARCHAR PRIMARY KEY,
     pixels UTINYINT[4096] NOT NULL  -- 64x64, row-major
@@ -89,9 +112,9 @@ def copy_rows(con: duckdb.DuckDBPyConnection, table: str, rows: list[tuple]) -> 
         os.unlink(path)
 
 
-def list_literal(values: list[int]) -> str:
-    """A Python list as DuckDB's list literal, e.g. "[1,2,3]", for COPY loading."""
-    return "[" + ",".join(map(str, values)) + "]"
+def list_literal(values: list[int] | list[int | None]) -> str:
+    """DuckDB list literal for COPY; spell transparent elements NULL, not Python's None."""
+    return "[" + ",".join("NULL" if value is None else str(value) for value in values) + "]"
 
 
 def load(con: duckdb.DuckDBPyConnection, lumps: list[Lump], maps: list[MapData],
@@ -118,3 +141,10 @@ def load(con: duckdb.DuckDBPyConnection, lumps: list[Lump], maps: list[MapData],
         (t.name, u, list_literal(pixels)) for t in graphics.textures for u, pixels in enumerate(t.columns)
     ])
     copy_rows(con, "flats", [(name, list_literal(pixels)) for name, pixels in graphics.flats])
+    copy_rows(con, "sprites", [
+        (s.name, s.width, s.height, s.left_offset, s.top_offset) for s in graphics.sprites
+    ])
+    copy_rows(con, "sprite_columns", [
+        (s.name, u, list_literal(pixels)) for s in graphics.sprites for u, pixels in enumerate(s.columns)
+    ])
+    copy_rows(con, "thing_types", THING_TYPES)

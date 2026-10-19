@@ -31,11 +31,22 @@ class Texture:
 
 
 @dataclass(frozen=True)
+class Sprite:
+    name: str
+    width: int
+    height: int
+    left_offset: int
+    top_offset: int
+    columns: list[list[int | None]]  # uncovered texels stay transparent, not palette index 0
+
+
+@dataclass(frozen=True)
 class Graphics:
     palette: list[tuple[int, int, int]]  # 256 (r, g, b) rows, empty without PLAYPAL
     colormaps: list[list[int]]  # 34 levels of 256 palette indices, empty without COLORMAP
     textures: list[Texture]  # empty without TEXTURE1/TEXTURE2 + PNAMES
     flats: list[tuple[str, list[int]]]  # empty without F_START/F_END
+    sprites: list[Sprite]  # empty without S_START/S_END
 
 
 def decode_palette(data: bytes) -> list[tuple[int, int, int]]:
@@ -106,7 +117,8 @@ def composite(
 
 
 def draw_patch(
-    data: bytes, columns: list[list[int]], width: int, height: int, originx: int, originy: int,
+    data: bytes, columns: list[list[int]] | list[list[int | None]],
+    width: int, height: int, originx: int, originy: int,
 ) -> None:
     if len(data) < PICTURE_HEADER.size:
         raise CorruptWad()
@@ -140,13 +152,28 @@ def draw_patch(
             pos += 4 + length
 
 
-def flat_lumps(lumps: list[Lump]) -> list[Lump]:
-    """Every lump strictly between F_START and F_END; 0-byte inner markers (F1_START...) skipped."""
+def namespace_lumps(lumps: list[Lump], start_marker: str, end_marker: str) -> list[Lump]:
+    """Non-empty lumps strictly between the markers; skip 0-byte inner markers."""
     names = [lump.name for lump in lumps]
-    if "F_START" not in names or "F_END" not in names:
+    if start_marker not in names or end_marker not in names:
         return []
-    start, end = names.index("F_START"), names.index("F_END")
+    start, end = names.index(start_marker), names.index(end_marker)
     return [lump for lump in lumps[start + 1:end] if lump.size > 0]
+
+
+def flat_lumps(lumps: list[Lump]) -> list[Lump]:
+    return namespace_lumps(lumps, "F_START", "F_END")
+
+
+def decode_sprite(lump: Lump) -> Sprite:
+    if len(lump.data) < PICTURE_HEADER.size:
+        raise CorruptWad()
+    width, height, left, top = PICTURE_HEADER.unpack_from(lump.data)
+    if width < 0 or height < 0:
+        raise CorruptWad()
+    columns = [[None] * height for _ in range(width)]
+    draw_patch(lump.data, columns, width, height, 0, 0)
+    return Sprite(lump.name, width, height, left, top, columns)
 
 
 def decode_graphics(lumps: list[Lump]) -> Graphics:
@@ -177,4 +204,5 @@ def decode_graphics(lumps: list[Lump]) -> Graphics:
             raise CorruptWad()
         flats.append((lump.name, list(lump.data)))
 
-    return Graphics(palette, colormaps, textures, flats)
+    sprites = [decode_sprite(lump) for lump in namespace_lumps(lumps, "S_START", "S_END")]
+    return Graphics(palette, colormaps, textures, flats, sprites)
