@@ -20,7 +20,7 @@ import math
 import pytest
 
 from conftest import render_query, run_import
-from test_render import corridor_map_lumps, make_db, split_map_lumps
+from test_render import corridor_map_lumps, grid, make_db, split_map_lumps, tex
 from wadbuilder import graphics_lumps, map_lumps, write_wad
 
 
@@ -168,6 +168,25 @@ def test_point_exactly_on_a_split_line_goes_to_the_left_child(tmp):
         assert render_query(db, f"SELECT sector FROM point_sector('E1M1', 63.5, {y})") == [(0,)], y
         assert render_query(db, f"SELECT sector FROM point_sector('E1M1', 64.5, {y})") == [(1,)], y
     assert reference_walk(db, "E1M1")(64, 64) == 0  # the Python walk agrees
+
+
+def test_short_sky_columns_do_not_sample_the_next_image_in_the_atlas(tmp):
+    """Characterize list_extract's old out-of-image NULL -> palette[0] fallback.
+    G6 always wraps v at 128, even for a shorter imported SKY1. An atlas lookup
+    must not read the following column/image when that local index is absent.
+    """
+    lumps = corridor_map_lumps(sky=True, graphics=False) + graphics_lumps(
+        [("SKY1", 256, 16), ("WALLE", 64, 64), ("WALLS", 64, 64),
+         ("WALLW", 64, 64), ("WALLN", 64, 64)],
+        ["FLATW", "CEILW"],
+    )
+    db = make_db(tmp, lumps)
+    pixels = grid(db, "render_pixels('E1M1', 0, 0, 0, 16, 10)")
+    assert pixels[0][8][2:] == ("sky", *tex(245, 10))
+    for y in (1, 2):  # v = 30, 50: beyond the 16-entry sky column
+        assert all(cell[2:] == ("sky", 0, 255, 0) for cell in pixels[y])
+    assert pixels[5][8][2:] == ("wall", *tex(8, 39))
+    assert pixels[8][8][2:] == ("floor", *tex(29, 5))
 
 
 # --- render.sql loads twice on one connection --------------------------------
