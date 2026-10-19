@@ -10,11 +10,12 @@ Frames must stay byte-identical (golden hashes in tests/test_doom1_wad.py and ev
 
 ## Tasks
 
-- T1 [S1,S2] Profile, optimize render.sql stage by stage, byte-identical frames, report before/after with sqldoom-bench. route: worker. commit: pending
-- T2 [S1] README Performance numbers, close. route: inline. commit: pending
+- T1 [S1,S2] Profile, optimize render.sql stage by stage, byte-identical frames, report before/after with sqldoom-bench. route: worker. commit: 8ab424a [partial, accepted by the user]
+- T2 [S1] README Performance numbers, close. route: inline. commit: (this commit, see git log) [done]
 
 ## Log
 
 - L1: "si, procede con la pasada de rendimiento"
 - L2: Known candidates from Part 4a (odd/tasks/textures.md L5, worker profile): per-pixel lighting join with render_lit ~13 ms; flats' 4096-element list_extract ~5 ms; geometry pipeline (hits, windows, spans) ~26 ms; final grid + ANSI encoding. Lessons: algebraically equal float reorderings move pixels (keep expression order for anything rounded); per-pixel joins carrying LIST columns copy the lists; count(*) prunes projections and misleads stage profilers (materialize the stage, e.g. SELECT sum(hash(*)), when timing).
 - L3: T1 result (partial): texel atlas offsets instead of carried texture lists in spans, shared lighting lookup array instead of a per-pixel join, packed-color ANSI pairing. Byte-identical (234 differential comparisons, 9 maps, fixed seed 20260403; 152 tests). Controlled interleaved E1M1 160x50: 92.2 -> 79.2 ms (~14%); E1M3 111.1 -> 106.3; E1M6 110.7 -> 98.5. Target (~half) NOT met. All measurements under load 4-5 from an unrelated long-running job (polymarket-data build_r2_layout.py, ~2 cores). Remaining cost: geometry + windows ~33 ms cumulative, final ANSI ~18 ms on top of the framebuffer. Rejected with numbers: shared span joins, integer hit rank, list-based BSP paths, wide window rows.
+- L4: "si, por ahora sigamos, luego vemos si podemos optimizar aun mas" -> the user accepted the ~14% gain; merge and move on to sprites (Part 4b); the pipeline restructure is deferred. Review review-83e4598008f3a4ce approved 8ab424a with advisories: atlas snapshot goes stale after a re-import until render.sql reloads; flat atlas assumes the 4096 stride.

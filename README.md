@@ -285,7 +285,15 @@ importer only checks the patches a texture actually draws.
 
 Textures moved a default terminal frame of E1M1 from ~39 ms to ~48-50 ms on this machine, about 20 fps. The frame
 text grew from ~44 KB to ~148 KB, because textured cells change color almost every cell and the ANSI encoder can no
-longer skip codes. Both are the next optimization targets.
+longer skip codes.
+
+`sqldoom-bench` on a second machine (a laptop) then showed where the time goes: SQL ~76 ms and the terminal ~5 ms per
+frame, so the renderer, not the frame text, is the bottleneck. A second pass removed per-pixel work: spans point into a
+`TEMP` texel atlas by offset instead of carrying texture lists, lighting reads one shared lookup array instead of a
+per-pixel join, and ANSI cells aggregate packed colors. Frames stay byte-identical, and an interleaved old/new
+measurement put E1M1 at 92 -> 79 ms (~14%) on that laptop under background load. Going much further needs a different
+pipeline shape (cutting hidden spans per column before expanding them to pixels), which is left for later.
+The texel atlas is built when `render.sql` loads, so restart the viewer after re-importing a database.
 
 ### Measuring your machine
 
