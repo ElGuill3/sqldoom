@@ -9,6 +9,7 @@ import fcntl
 import math
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -21,7 +22,7 @@ from importlib.resources import files
 import duckdb
 
 from conftest import run_import
-from sqldoom.view import parse_keys, run_viewer, step
+from sqldoom.view import FIRST_HOLD, REPEAT_HOLD, Keys, due_tics, parse_keys, run_viewer
 from test_render import corridor_map_lumps
 from wadbuilder import write_wad
 
@@ -63,32 +64,50 @@ def test_parse_keys_ignores_unknown_bytes():
     assert parse_keys(b"") == []
 
 
-# --- step ----------------------------------------------------------------------
+def test_parse_keys_strafe_and_run():
+    assert parse_keys(b",.") == ["strafe_left", "strafe_right"]
+    assert parse_keys(b"WASD") == ["run", "forward", "run", "left", "run", "back", "run", "right"]
+    # Shift + arrows: CSI 1;2 A/B/C/D
+    assert parse_keys(b"\x1b[1;2A\x1b[1;2D") == ["run", "forward", "run", "left"]
 
 
-def test_step_moves_forward_along_the_facing_direction():
-    assert all(math.isclose(a, b, abs_tol=1e-9)
-               for a, b in zip(step((0, 0, 0), "forward"), (16, 0, 0)))
-    assert all(math.isclose(a, b, abs_tol=1e-9)
-               for a, b in zip(step((0, 0, 90), "forward"), (0, 16, 90)))
+# --- held keys (M7) -------------------------------------------------------------
 
 
-def test_step_moves_back():
-    assert all(math.isclose(a, b, abs_tol=1e-9)
-               for a, b in zip(step((10, 0, 0), "back"), (-6, 0, 0)))
-    assert all(math.isclose(a, b, abs_tol=1e-9)
-               for a, b in zip(step((0, 0, 90), "back"), (0, -16, 90)))
+def test_a_fresh_press_holds_long_enough_to_bridge_the_repeat_delay():
+    keys = Keys()
+    keys.press(["forward"], now=10.0)
+    assert keys.controls(10.0) == (1, 0, 0, False)
+    assert keys.controls(10.0 + FIRST_HOLD - 0.01) == (1, 0, 0, False)
+    assert keys.controls(10.0 + FIRST_HOLD + 0.01) == (0, 0, 0, False)
 
 
-def test_step_turns_and_wraps_the_angle():
-    assert step((0, 0, 0), "left")[2] == 7.5
-    assert step((0, 0, 352.5), "left")[2] == 0.0  # 360 wraps to 0
-    assert step((0, 0, 0), "right")[2] == 352.5
-    assert step((0, 0, 7.5), "right")[2] == 0.0
+def test_auto_repeats_keep_a_key_held_until_they_stop():
+    keys = Keys()
+    for t in (10.0, 10.5, 10.53, 10.56):  # press, then auto-repeat
+        keys.press(["left"], now=t)
+    assert keys.controls(10.56 + REPEAT_HOLD - 0.01) == (0, 0, 1, False)
+    assert keys.controls(10.56 + REPEAT_HOLD + 0.01) == (0, 0, 0, False)
 
 
-def test_step_leaves_the_camera_unchanged_for_unknown_actions():
-    assert step((3, 4, 5), "quit") == (3, 4, 5)
+def test_controls_combine_opposite_and_independent_keys():
+    keys = Keys()
+    keys.press(["forward", "back", "strafe_right", "right", "run", "forward"], now=0.0)
+    assert keys.controls(0.1) == (0, 1, -1, True)
+    keys = Keys()
+    keys.press(["back", "strafe_left", "left"], now=0.0)
+    assert keys.controls(0.1) == (-1, -1, 1, False)
+
+
+# --- tic clock (M7) -------------------------------------------------------------
+
+
+def test_due_tics_follow_a_35_hz_clock_and_are_capped():
+    assert due_tics(start=0.0, now=0.0, done=0) == 0
+    assert due_tics(start=0.0, now=1.0, done=0) == 10  # capped: a slow frame never spirals
+    assert due_tics(start=0.0, now=1.0, done=30) == 5
+    assert due_tics(start=0.0, now=1.0, done=35) == 0
+    assert due_tics(start=0.0, now=0.1, done=0, cap=100) == 3  # 0.1 s = 3.5 tics
 
 
 # --- end to end over a pseudo-terminal -----------------------------------------
@@ -178,8 +197,11 @@ def test_viewer_walks_forward_and_quits_cleanly(tmp):
         assert b"\x1b[?25l" in buf  # cursor hidden
         assert b"E1M1  x=0 y=0 angle=0" in buf  # the first status line
 
-        os.write(master, b"w")
-        buf += read_until(master, b"x=16 y=0", deadline)  # the moved camera
+        os.write(master, b"w")  # M7: one press walks for FIRST_HOLD, then coasts
+        buf += drain(master, 4.0)
+        xs = [int(x) for x in re.findall(rb"E1M1  x=(-?\d+) y=0 ", buf)]
+        assert xs[0] == 0 and xs == sorted(xs)  # walked east, never back
+        assert 96 < xs[-1] <= 112  # stopped by the east wall (x = 128) at the radius
         assert buf.count(b" fps") >= 2  # at least two status lines
 
         os.write(master, b"q")
@@ -214,6 +236,18 @@ def test_viewer_fails_cleanly_without_textures(tmp):
         deadline = time.monotonic() + 30
         buf = read_until(master, b"database has no textures", deadline)
         assert b"error: database has no textures: re-run sqldoom-import --force" in buf
+        assert proc.wait(timeout=10) == 1
+    finally:
+        stop_viewer(proc, master, slave)
+
+
+def test_viewer_fails_cleanly_with_a_start_outside_the_map(tmp):
+    proc, master, slave = spawn_viewer(make_db(tmp), 9, 20, "--pos", "1000,0")
+    try:
+        deadline = time.monotonic() + 30
+        buf = read_until(master, b"outside the map", deadline)
+        assert b"error: position is outside the map: 1000.0,0.0" in buf
+        assert b"\x1b[?1049h" not in buf  # failed before taking over the terminal
         assert proc.wait(timeout=10) == 1
     finally:
         stop_viewer(proc, master, slave)
