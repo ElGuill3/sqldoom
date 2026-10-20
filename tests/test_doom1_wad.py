@@ -4,10 +4,12 @@ Set SQLDOOM_WAD to point elsewhere; default is wad/doom1.wad (see README).
 """
 
 import hashlib
+import math
 import os
 import struct
 from pathlib import Path
 
+import duckdb
 import pytest
 
 from conftest import query, render_query, run_automap, run_import, run_module
@@ -240,3 +242,26 @@ def test_first_person_terminal_output_is_stable(db):
     assert hashlib.sha256(result.stdout).hexdigest() == (
         "0709bc3ca34dbe33c164da0392f7ba188dbfb5fca3b82cb70fc5eddf2cae26f8"
     )
+
+
+def test_running_through_e1m1_never_enters_a_wall(db):
+    # Part 5a (player), M4: from the start, 200 tics running forward then turning; after
+    # every tic the player is inside the map and at least the radius from every wall.
+    from sqldoom.game import load_game, player, tic
+
+    with duckdb.connect(str(db), read_only=True) as con:
+        load_game(con, "E1M1")
+        walls = con.execute(
+            "SELECT ax, ay, ex, ey, len2 FROM game_lines WHERE map = 'E1M1' AND blocking"
+        ).fetchall()
+        moved = 0.0
+        for i in range(200):
+            before = player(con)
+            tic(con, 1, 0, 1 if i % 50 > 40 else 0, True)
+            state = player(con)
+            moved += math.hypot(state["x"] - before["x"], state["y"] - before["y"])
+            assert all(math.isfinite(state[k]) for k in ("x", "y", "z", "angle", "momx", "momy"))
+            for ax, ay, ex, ey, len2 in walls:
+                t = 0.0 if len2 == 0 else max(0.0, min(1.0, ((state["x"] - ax) * ex + (state["y"] - ay) * ey) / len2))
+                assert math.hypot(ax + t * ex - state["x"], ay + t * ey - state["y"]) >= 16
+        assert moved > 500, "the player hardly moved"
