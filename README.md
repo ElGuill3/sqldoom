@@ -9,7 +9,8 @@ Doom running inside [DuckDB](https://duckdb.org), built from scratch, one part a
 | 3 | First-person view + terminal viewer | done |
 | 4a | Doom's palette, lighting, wall textures, flats, sky | done |
 | 4b | Sprites: monsters, items, decorations (static) | done |
-| 5 | Game logic: collisions, doors, enemies | next |
+| 5a | Player state and movement in SQL: momentum, collisions, steps | done |
+| 5b | Game logic: doors, animation, enemies | next |
 
 ## Setup
 
@@ -180,15 +181,16 @@ SELECT text FROM automap_ascii('E1M1', 100, 45);
 ![E1M1 from the player start](docs/e1m1_view.png) ![E1M1 looking out of a window](docs/e1m1_view_window.png)
 
 ```sh
-uv run sqldoom-view doom1.duckdb E1M1                                  # walk around (noclip)
+uv run sqldoom-view doom1.duckdb E1M1                                  # play: walk around (Part 5a)
 uv run sqldoom-render doom1.duckdb E1M1                                # print one frame (160x50 characters)
 uv run sqldoom-render doom1.duckdb E1M1 -o view.png                    # PNG (320x200 pixels)
 uv run sqldoom-render doom1.duckdb E1M1 --pos 1056,-3200 --angle 45 -o window.png
 ```
 
-The viewer needs a terminal with 24-bit color, such as WezTerm or Windows Terminal. Keys: `w`/`s` or Up/Down move
-16 units, `a`/`d` or Left/Right turn 7.5 degrees, `q`/Esc quits. There are no collisions yet (Part 5), so you can
-walk through walls. The status line shows the position, angle and frames per second. Without `--size` the frame
+The viewer needs a terminal with 24-bit color, such as WezTerm or Windows Terminal. Keys: `w`/`s` or Up/Down move,
+`a`/`d` or Left/Right turn, `,`/`.` strafe, Shift (uppercase `W`/`A`/`S`/`D` or Shift + arrows) runs, `q`/Esc quits.
+Since Part 5a the player moves like in Doom, with momentum, and walls and high steps stop it. The status line shows
+the position, angle, floor height (z), speed and frames per second. Without `--size` the frame
 follows terminal resizes (drag the window edge and it redraws at the new size), and the terminal is restored even
 if the viewer is killed with SIGTERM or SIGHUP (for example by closing the tab).
 
@@ -197,12 +199,13 @@ usage: sqldoom-render [-h] [--size WxH] [--pos X,Y] [--angle DEG] [-o OUTPUT] da
 usage: sqldoom-view [-h] [--size COLSxROWS] [--pos X,Y] [--angle DEG] database map
 ```
 
-- Without `--pos`/`--angle` the camera is the player 1 start.
+- Without `--pos`/`--angle` the camera (the viewer: the player's start) is the player 1 start.
 - `--size` counts characters for terminal output (one character = 2 pixels stacked) and pixels for PNG. Both values
   must be between 8 and 4096. The viewer defaults to the terminal size (minus one status row) and, without
   `--size`, keeps following terminal resizes.
-- Errors are the automap ones, plus `error: map has no player start: <MAP>` and
-  `error: sqldoom-view needs an interactive terminal`.
+- Errors are the automap ones, plus `error: map has no player start: <MAP>`,
+  `error: sqldoom-view needs an interactive terminal` and, for a viewer start outside the map,
+  `error: position is outside the map: X,Y`.
 
 Walls, floors, ceilings and the sky use Doom's own textures and lighting (Part 4a below). Databases imported before
 Part 4a have no textures; the renderer then stops with `error: database has no textures: re-run sqldoom-import --force`.
@@ -348,6 +351,35 @@ before Part 4b still renders, just without sprites.
 - **Light.** Sprites are lit like walls (sector light and distance), and lamps, candles and power-ups are full bright.
 
 Things do not move or animate yet: that is Part 5.
+
+## Part 5a: the player, in SQL
+
+Re-running the import is not needed: the player lives in a `TEMP` table, so the database stays read-only and every
+session starts a new game.
+
+- **One tic, one UPDATE.** Doom advances its world 35 times per second. Here each tic is
+  `UPDATE player SET ... FROM game_step(forward, side, turn, run)`, and `game_step` (in `sql/game.sql`) computes the
+  next row: turn, thrust along the facing, Doom's speed limit, the move, then friction. The constants are Doom's own,
+  converted from fixed point: 0.78125 units of thrust per tic walking, friction 0.90625, so you walk at about 8 units
+  per tic and run at about 16.7.
+- **Collisions.** The player is a circle of radius 16 and height 56. A position fits when no wall is closer than
+  16, the opening left by every nearby sector is at least 56 units high, and the floor there is at most 24 units
+  above the feet (a step); the player then stands on the highest of those floors. A blocked move retries along x
+  alone, then y alone, so walking diagonally into a wall slides along it. Moves longer than the radius go in two
+  half steps so they cannot skip over a line.
+- **Thinking in sets.** A first version asked "does this position fit?" with one subquery per candidate position
+  and took 28 ms per tic. The current one lists every position a tic may need (at most 15: three tries for the
+  first half step, and three for the second from each possible outcome of the first), checks them all against the
+  walls in one join, and only then picks the outcome. About 10 ms, most of it DuckDB planning the query.
+- **Two DuckDB instances.** The viewer renders on a connection that uses every core, and runs the tics on a second,
+  single-threaded instance that attaches the same file read-only: for a query this small, coordinating threads costs
+  more than it saves (14 ms per tic on 8 threads, 9.7 ms on one).
+- **Keys without releases.** Terminals report key presses and auto-repeats, never releases. A fresh press counts as
+  held for half a second, which covers the pause before auto-repeat starts, and each repeat keeps it held 0.15 s
+  longer. A tap therefore walks for half a second.
+
+Simplifications, compared with Doom: the player is a circle (Doom uses a square), and a blocked move does not
+slide along the wall's direction (Doom's `P_SlideMove`), it only drops the blocked axis.
 
 ## Tests
 
