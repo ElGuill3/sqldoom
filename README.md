@@ -204,8 +204,9 @@ usage: sqldoom-view [-h] [--size COLSxROWS] [--pos X,Y] [--angle DEG] database m
   must be between 8 and 4096. The viewer defaults to the terminal size (minus one status row) and, without
   `--size`, keeps following terminal resizes.
 - Errors are the automap ones, plus `error: map has no player start: <MAP>`,
-  `error: sqldoom-view needs an interactive terminal` and, for a viewer start outside the map,
-  `error: position is outside the map: X,Y`.
+  `error: sqldoom-view needs an interactive terminal` and, for a viewer start outside the map or where the
+  player does not fit (overlapping a wall, or under a ceiling lower than 56), `error: position is outside the map: X,Y`
+  or `error: position does not fit the player: X,Y`.
 
 Walls, floors, ceilings and the sky use Doom's own textures and lighting (Part 4a below). Databases imported before
 Part 4a have no textures; the renderer then stops with `error: database has no textures: re-run sqldoom-import --force`.

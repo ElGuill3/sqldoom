@@ -265,3 +265,14 @@ def test_running_through_e1m1_never_enters_a_wall(db):
                 t = 0.0 if len2 == 0 else max(0.0, min(1.0, ((state["x"] - ax) * ex + (state["y"] - ay) * ey) / len2))
                 assert math.hypot(ax + t * ex - state["x"], ay + t * ey - state["y"]) >= 16
         assert moved > 500, "the player hardly moved"
+
+
+def test_every_player_start_fits_the_player(db):
+    # Part 5a: load_game refuses a start where the player could not move; Doom's own
+    # starts must all pass.
+    from sqldoom.game import load_game, player
+
+    with duckdb.connect(str(db), read_only=True) as con:
+        for i in range(1, 10):
+            load_game(con, f"E1M{i}")
+            assert player(con)["map"] == f"E1M{i}"

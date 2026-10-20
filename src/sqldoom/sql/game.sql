@@ -31,22 +31,52 @@ LEFT JOIN sectors secb ON secb.map = linedefs.map AND secb.id = sb.sector;
 -- The floor and ceiling of the sector containing (px, py): cast a ray east, take the
 -- nearest line it crosses and the side facing the point (front is the right side of
 -- v1 -> v2). No row, or NULL heights, when the point is outside the map. Faster than the
--- renderer's BSP walk (point_sector) for the few points a tic checks. load_game uses it
--- for the start; game_step applies the same rule inline (its `checked` step): keep the
--- two in step.
+-- renderer's BSP walk (point_sector) for the few points a tic checks.
+--
+-- A line counts as crossed when it spans the ray's y half-open, so only lines going up
+-- from a vertex on the ray count. When the ray passes exactly through a vertex, several
+-- of those tie at the same hit_x; the region the ray comes from is bounded by the one
+-- closest to the ray's direction, rotating from west towards north: the smallest ex/ey
+-- (for every crossed line ex/ey is the run per unit of rise of its upper part).
+--
+-- load_game uses this macro and game_fit for the start; game_step applies the same rules
+-- inline (its `pairs` and `checked` steps): keep the three in step.
 CREATE OR REPLACE TEMP MACRO game_sector(map_name, px, py) AS TABLE
 SELECT CASE WHEN front THEN front_floor ELSE back_floor END AS floor,
        CASE WHEN front THEN front_ceiling ELSE back_ceiling END AS ceiling
 FROM (
     SELECT front_floor, front_ceiling, back_floor, back_ceiling,
            (px - ax) * ey - (py - ay) * ex >= 0 AS front,
-           ax + (py - ay) * ex / ey AS hit_x, line_id
+           ax + (py - ay) * ex / ey AS hit_x, ex / ey AS run_per_rise, line_id
     FROM game_lines
     WHERE map = map_name AND (ay > py) <> (ay + ey > py) AND maxx >= px
 )
 WHERE hit_x >= px
-ORDER BY hit_x, line_id
+ORDER BY hit_x, run_per_rise, line_id
 LIMIT 1;
+
+-- M4 for one position, as game_step checks it: can the player (radius 16, height 56)
+-- stand at (px, py) with its feet at pz? Lines closer than the radius touch it; a
+-- touching blocking line refuses the position, the others raise the floor and lower the
+-- ceiling to their sectors' extremes.
+CREATE OR REPLACE TEMP MACRO game_fit(map_name, px, py, pz) AS TABLE
+SELECT sector.floor IS NOT NULL AND NOT coalesce(touch.blocked, false)
+       AND least(sector.ceiling, touch.ceiling) - greatest(sector.floor, touch.floor) >= 56
+       AND greatest(sector.floor, touch.floor) - pz <= 24 AS ok
+FROM (SELECT any_value(floor) AS floor, any_value(ceiling) AS ceiling
+      FROM game_sector(map_name, px, py)) sector,
+     (SELECT bool_or(blocking) AS blocked,
+             max(greatest(front_floor, back_floor)) AS floor,
+             min(least(front_ceiling, back_ceiling)) AS ceiling
+      FROM (
+          SELECT *, greatest(0.0, least(1.0, CASE WHEN len2 = 0 THEN 0.0
+                        ELSE ((px - ax) * ex + (py - ay) * ey) / len2 END)) AS t
+          FROM game_lines
+          WHERE map = map_name AND px > minx - 16 AND px < maxx + 16
+            AND py > miny - 16 AND py < maxy + 16
+      )
+      WHERE (ax + t * ex - px) * (ax + t * ex - px) + (ay + t * ey - py) * (ay + t * ey - py) < 256
+     ) touch;
 
 -- M2-M5: the next player row for one tic of input. forward: 1 forward, -1 back; side:
 -- 1 strafe right, -1 left; turn: 1 turn left (counterclockwise), -1 right; run doubles
@@ -124,18 +154,20 @@ WITH turned AS (
            in_box AND (ax + t * ex - cx) * (ax + t * ex - cx)
                     + (ay + t * ey - cy) * (ay + t * ey - cy) < 256 AS touches,
            CASE WHEN crosses THEN ax + (cy - ay) * ex / ey END AS hit_x,
+           CASE WHEN crosses THEN ex / ey END AS run_per_rise,
            (cx - ax) * ey - (cy - ay) * ex >= 0 AS front
     FROM near
 ), checked AS (
-    -- The point's sector: the nearest crossed line, on the side facing the point (front
-    -- is the right side of v1 -> v2). No crossing at all: outside the map.
+    -- The point's sector: the nearest crossed line (ties at a vertex: the smallest ex/ey,
+    -- see game_sector), on the side facing the point (front is the right side of
+    -- v1 -> v2). No crossing at all: outside the map.
     SELECT k1, k2,
            bool_or(blocking) FILTER (touches) AS blocked,
            greatest(arg_min(CASE WHEN front THEN front_floor ELSE back_floor END,
-                            {'x': hit_x, 'line': line_id}) FILTER (hit_x >= cx),
+                            {'x': hit_x, 'run': run_per_rise, 'line': line_id}) FILTER (hit_x >= cx),
                     max(greatest(front_floor, back_floor)) FILTER (touches)) AS floorz,
            least(arg_min(CASE WHEN front THEN front_ceiling ELSE back_ceiling END,
-                         {'x': hit_x, 'line': line_id}) FILTER (hit_x >= cx),
+                         {'x': hit_x, 'run': run_per_rise, 'line': line_id}) FILTER (hit_x >= cx),
                  min(least(front_ceiling, back_ceiling)) FILTER (touches)) AS ceilingz,
            count(*) FILTER (hit_x >= cx) > 0 AS inside
     FROM pairs

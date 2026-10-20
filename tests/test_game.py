@@ -88,6 +88,44 @@ def test_a_position_outside_the_map_is_rejected(game):
         game(room_lumps(), pos=(500.0, 0.0))
 
 
+def test_a_start_where_the_player_does_not_fit_is_rejected(game):
+    # 10 units from the west wall: the radius 16 overlaps it, so every move would be
+    # blocked and the player could never leave.
+    with pytest.raises(ValueError, match="position does not fit the player: -118.0,0.0"):
+        game(room_lumps(), pos=(-118.0, 0.0))
+    with pytest.raises(ValueError, match="position does not fit the player: 0.0,0.0"):
+        game(room_lumps(ceiling=55))  # less headroom than the player's height
+
+
+def vertex_lumps():
+    """A ray cast east from y = 0 passes exactly through vertex V = (64, 0), where two
+    lines going up meet: La (V -> (64, 128)) and Lb (V -> (160, 128)). West of La is
+    sector 0 (floor 0), the wedge between La and Lb is sector 1 (floor 100), the rest
+    sector 2. Lb comes first, so a tie broken by line id picks the wrong line."""
+    return map_lumps(
+        "E1M1",
+        vertexes=[(-128, -128), (-128, 128), (64, 128), (160, 128), (256, 128),
+                  (256, -128), (64, -128), (64, 0)],
+        linedefs=[
+            (7, 3, 0, 1),  # Lb: front (east) -> sector 2, back -> sector 1
+            (7, 2, 2, 3),  # La: front (east) -> sector 1, back -> sector 0
+            (7, 6, 4, 5),  # Lc: V -> (64, -128), front (west) -> sector 0, back -> sector 2
+            (0, 1, 6, None), (1, 2, 7, None), (2, 3, 8, None), (3, 4, 9, None),
+            (4, 5, 10, None), (5, 6, 11, None), (6, 0, 12, None),
+        ],
+        sidedefs=[2, 1, 1, 0, 0, 2, 0, 0, 1, 2, 2, 2, 0],
+        sectors=[(0, 128), (100, 228), (0, 128)],
+        things=[(0, 0, 0, 1)],
+    )
+
+
+def test_a_ray_through_a_vertex_picks_the_sector_the_point_is_in(game):
+    con = game(vertex_lumps())
+    assert player(con)["z"] == 0.0  # sector 0, not the wedge's floor 100
+    states = run(con, 10, forward=1)  # along y = 0, the ray keeps hitting V
+    assert states[-1]["x"] > 20 and all(s["z"] == 0.0 for s in states)
+
+
 def test_starting_again_resets_the_state(game):
     con = game(room_lumps())
     run(con, 3, forward=1)

@@ -12,7 +12,8 @@ def load_game(con, map_name: str, pos=None, angle=None) -> None:
     """Create the game macros and (re)start the player on map_name: at the player 1
     start, or at pos/angle (each overrides independently, as in sqldoom-render), standing
     on its sector's floor and at rest. Raises ValueError when there is no start to fall
-    back on or the position is outside the map."""
+    back on, the position is outside the map, or the player does not fit there (a start
+    overlapping a wall or under a low ceiling could never move)."""
     con.execute(GAME_SQL)
     start = con.execute(
         "SELECT x, y, angle FROM things WHERE map = ? AND type = 1 ORDER BY id LIMIT 1",
@@ -25,6 +26,9 @@ def load_game(con, map_name: str, pos=None, angle=None) -> None:
     floor = con.execute("SELECT floor FROM game_sector(?, ?, ?)", [map_name, x, y]).fetchone()
     if floor is None or floor[0] is None:
         raise ValueError(f"position is outside the map: {x},{y}")
+    (fits,) = con.execute("SELECT ok FROM game_fit(?, ?, ?, ?)", [map_name, x, y, floor[0]]).fetchone()
+    if not fits:
+        raise ValueError(f"position does not fit the player: {x},{y}")
     con.execute("INSERT INTO player VALUES (?, ?, ?, ?, ?, 0.0, 0.0, 0)",
                 [map_name, x, y, float(floor[0]), a])
 
