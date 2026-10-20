@@ -8,8 +8,8 @@ Doom running inside [DuckDB](https://duckdb.org), built from scratch, one part a
 | 2 | Draw a top-down map with SQL | done |
 | 3 | First-person view + terminal viewer | done |
 | 4a | Doom's palette, lighting, wall textures, flats, sky | done |
-| 4b | Sprites: monsters, items, decorations | next |
-| 5 | Game logic: collisions, doors, enemies | planned |
+| 4b | Sprites: monsters, items, decorations (static) | done |
+| 5 | Game logic: collisions, doors, enemies | next |
 
 ## Setup
 
@@ -324,6 +324,30 @@ When stdout is not a terminal (a pipe or a file) it says `skipped` and the estim
 dominates, the renderer is the bottleneck; if `terminal per frame` does, the frame text is. DuckDB spreads each query
 over its threads, so machines with fewer cores lose more. `--frames` accepts 1 to 1000; `--size`, `--pos` and
 `--angle` work like in `sqldoom-render`.
+
+## Part 4b: sprites
+
+![Two zombiemen in E1M1](docs/e1m1_sprites.png)
+
+Re-import to get the sprite tables: `uv run sqldoom-import wad/doom1.wad doom1.duckdb --force`. A database imported
+before Part 4b still renders, just without sprites.
+
+- **What is a thing?** The WAD only stores a type number per thing. Which sprite a type uses lives in Doom's C source
+  (`info.c`), so the importer loads a small `thing_types` table (type, sprite, frame, full bright) for the shareware
+  types. Player starts and teleport destinations have no sprite. Things are shown as Doom spawns them on its default
+  skill ("Hurt me plenty", thing flag 2), and multiplayer-only things (flag 16) are skipped.
+- **Pictures.** Sprites use the same column/post picture format as wall patches, but uncovered texels are
+  transparent, stored as `NULL` inside the column lists.
+- **Rotations.** A lump name like `TROOA2A8` is sprite `TROO`, frame `A`, rotation 2, and the same picture mirrored
+  serves rotation 8. The rotation comes from the angle between the camera and the direction the thing faces;
+  rotation 0 serves every angle.
+- **Projection and clipping.** A thing at depth `tz` scales by `f / tz` and stands on its sector's floor. Each sprite
+  column is visible only inside the opening left by the walls of that screen column that are nearer than the
+  sprite: the same window functions that hide what is behind steps and windows also hide monsters behind them.
+  Where sprites overlap, the nearest one wins.
+- **Light.** Sprites are lit like walls (sector light and distance), and lamps, candles and power-ups are full bright.
+
+Things do not move or animate yet: that is Part 5.
 
 ## Tests
 

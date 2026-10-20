@@ -10,9 +10,9 @@ first-person view, correctly hidden behind walls and steps. Things stay static (
 
 ## Tasks
 
-- T1 [S2] Importer: sprite pictures (P1) and the thing type table (P2). route: worker. commit: pending
-- T2 [S2] Renderer: project, rotate, light and clip sprites (P3-P7); measure. route: worker. commit: pending
-- T3 [S1,S2] README Part 4b, goldens after a visual check, screenshots. route: inline. commit: pending
+- T1 [S2] Importer: sprite pictures (P1) and the thing type table (P2). route: worker. commit: 38be3a4 [done]
+- T2 [S2] Renderer: project, rotate, light and clip sprites (P3-P7); measure. route: worker + parent fix. commit: cdcce88 [done]
+- T3 [S1,S2] README Part 4b, goldens after a visual check, screenshots. route: inline. commit: (this commit, see git log) [done]
 
 ## Log
 
@@ -26,3 +26,4 @@ first-person view, correctly hidden behind walls and steps. Things stay static (
   - P6 Clipping: a sprite pixel in column x is visible only inside the window left by the wall hits of that column that are nearer than the sprite (`t < tz`), computed exactly like D6's windows (max opening top, min opening bottom over those hits; a nearer one-sided hit hides the whole column). Visible sprite pixels replace whatever the column drew there; where sprites overlap, the nearest sprite (smallest tz, then thing id) wins.
   - P7 Lighting: sprites use the light of the thing's sector with the wall rule of G7 (scale `least(47, floor(2560 / tz))`, no fake contrast), or colormap 0 when `full_bright`. Surface name `sprite` (new value in render_pixels.surface).
   - P8 Contract: render_pixels/render_rgb/render_ansi and the CLIs keep their signatures. A database imported before Part 4b (no `sprites` table) renders without sprites rather than failing, and sqldoom-render/view print nothing extra.
+- L3: T2 evidence: the worker stopped partial (38/48 sprite tests failing). Root cause found by the parent: `CREATE TEMP TABLE IF NOT EXISTS sprites` stand-ins shadowed the imported tables (DuckDB resolves TEMP first; IF NOT EXISTS checks only the temp schema). Fixed in common.load_render with duckdb_tables(). 211 tests; 126 differential frames on a pre-sprite database identical to main; first-person goldens re-recorded after a visual check (start room shows items; a view of two zombiemen at (2272,-2432) shows projection, transparency and step clipping). Cost of sprites under load ~9: E1M1 80.5 vs 70.6 ms, E1M3 118.3 vs 122.4, E1M6 87.8 vs 104.9 (no sprites vs sprites, interleaved medians): 0-20%, noisy. Slices: 38be3a4 importer, cdcce88 renderer (~600 lines incl. tests), docs.
