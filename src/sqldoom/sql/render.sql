@@ -162,9 +162,45 @@ FROM (
     SELECT 1, name, 0, CAST(pixels AS UTINYINT[]) FROM flats
 );
 
+-- P8: databases imported before Part 4b have no sprite tables. common.load_render
+-- creates empty TEMP stand-ins before this file runs, and only when the database lacks
+-- them: a TEMP table would shadow the imported one, since DuckDB resolves temp first.
+
+-- P4: resolve both name pairs once, not per frame. Rotation 0 takes precedence;
+-- malformed/ambiguous names resolve deterministically by name, first pair first.
+CREATE OR REPLACE TEMP TABLE render_sprite_frames AS
+SELECT name, width, height, left_offset, top_offset,
+       left(name, 4) AS family, substr(name, pair.pos, 1) AS frame,
+       try_cast(substr(name, pair.pos + 1, 1) AS INTEGER) AS rotation,
+       pair.pos = 7 AS mirrored
+FROM sprites CROSS JOIN (VALUES (5), (7)) pair(pos)
+WHERE len(name) >= pair.pos + 1
+  AND try_cast(substr(name, pair.pos + 1, 1) AS INTEGER) BETWEEN 0 AND 8;
+
+CREATE OR REPLACE TEMP TABLE render_sprite_columns AS
+SELECT sprite, u, len(pixels) AS tex_length,
+       coalesce(sum(len(pixels)) OVER (
+           ORDER BY sprite, u ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0)::BIGINT AS tex_offset
+FROM sprite_columns;
+
+CREATE OR REPLACE TEMP TABLE render_sprite_texels AS
+SELECT flatten(list(pixels ORDER BY sprite, u)) AS pixels FROM sprite_columns;
+
+-- P3/P5/P7: sector lookup and skill/type filtering are static for these things.
+CREATE OR REPLACE TEMP TABLE render_things AS
+WITH located AS MATERIALIZED (
+    SELECT t.*, (SELECT sector FROM point_sector(t.map, t.x, t.y)) AS sector
+    FROM things t
+    WHERE (t.flags & 2) <> 0 AND (t.flags & 16) = 0
+)
+SELECT t.map, t.id, t.x, t.y, t.angle, tt.sprite, tt.frame, tt.full_bright,
+       sec.floor_height, sec.light_level
+FROM located t JOIN thing_types tt ON tt.type = t.type
+JOIN sectors sec ON sec.map = t.map AND sec.id = t.sector;
+
 -- T2 (S2, G4-G8): every visible pixel of the view from (px, py) at `angle` degrees, as
 -- (x, y, surface, r, g, b) rows. Surfaces: 'ceiling', 'wall', 'upper', 'lower',
--- 'floor', 'sky', 'empty' (G8, unchanged). Colors come from the imported graphics:
+-- 'floor', 'sky', 'empty', 'sprite' (P7). Colors come from the imported graphics:
 -- pixel RGB = palette[colormaps[level][texel]] (G7) with the texel picked per G4
 -- (walls), G5 (flats), or G6 (sky).
 CREATE OR REPLACE TEMP MACRO render_pixels(map_name, px, py, angle, width, height) AS TABLE
@@ -434,13 +470,92 @@ best AS (
         )
         GROUP BY c, y
     )
+),
+sprite_depths AS (
+    SELECT t.*, (t.x - px) * cos(rad) + (t.y - py) * sin(rad) AS tz,
+           (t.x - px) * sin(rad) - (t.y - py) * cos(rad) AS tx,
+           floor((((degrees(atan2(py - t.y, px - t.x)) - t.angle + 360 + 22.5)
+               % 360 + 360) % 360) / 45)::INTEGER + 1 AS rotation
+    FROM render_things t CROSS JOIN camera WHERE t.map = map_name
+),
+sprite_pictures AS (
+    SELECT d.*, pic.name, pic.width AS sw, pic.height AS sh,
+           pic.left_offset, pic.top_offset, pic.mirrored,
+           width / 2.0 + d.tx * f / d.tz AS cx, f / d.tz AS scale,
+           d.floor_height + pic.top_offset AS top,
+           CASE WHEN d.full_bright THEN 0 ELSE greatest(0, least(31,
+               (15 - least(15, greatest(0, d.light_level >> 4))) * 4
+               - least(47, CAST(floor(2560.0 / d.tz) AS BIGINT)) // 2)) END AS level
+    FROM sprite_depths d JOIN render_sprite_frames pic
+        ON pic.family = d.sprite AND pic.frame = d.frame
+        AND (pic.rotation = 0 OR pic.rotation = d.rotation)
+    CROSS JOIN camera
+    WHERE d.tz >= 4
+    QUALIFY row_number() OVER (PARTITION BY d.id ORDER BY
+        pic.rotation <> 0, pic.name, pic.mirrored) = 1
+),
+sprite_rects AS (
+    -- P5: cull depth and screen bounds BEFORE expanding columns or rows.
+    SELECT sprite_pictures.*, cx - left_offset * scale AS sx0,
+           cx + (sw - left_offset) * scale AS sx1,
+           height / 2.0 - (top - eye) * f / tz AS sy0,
+           height / 2.0 - (top - sh - eye) * f / tz AS sy1
+    FROM sprite_pictures CROSS JOIN camera
+    WHERE cx + (sw - left_offset) * scale > 0.5
+      AND cx - left_offset * scale <= width - 0.5
+      AND height / 2.0 - (top - sh - eye) * f / tz > 0.5
+      AND height / 2.0 - (top - eye) * f / tz <= height - 0.5
+),
+sprite_cols AS (
+    SELECT s.*, g.c,
+           CAST(floor((g.c + 0.5 - cx) / scale + left_offset) AS INTEGER) AS screen_u
+    FROM sprite_rects s,
+    LATERAL generate_series(greatest(0, CAST(ceil(sx0 - 0.5) AS BIGINT)),
+        least(width - 1, CAST(ceil(sx1 - 0.5) AS BIGINT) - 1)) g(c)
+),
+sprite_windows AS (
+    -- P6: reuse the EXACT D6 openings; only STRICTLY nearer hits clip.
+    SELECT s.id, s.c,
+           greatest(0.0, coalesce(max(o.opening_top), 0.0)) AS lo,
+           least(CAST(height AS DOUBLE), coalesce(min(o.opening_bottom),
+               CAST(height AS DOUBLE))) AS hi
+    FROM sprite_cols s LEFT JOIN openings o ON o.c = s.c AND o.t < s.tz
+    GROUP BY s.id, s.c
+),
+sprite_samples AS (
+    SELECT s.id, s.c, g.y, s.tz, s.level, col.tex_offset, col.tex_length,
+           CAST(floor(s.top - (eye - (g.y + 0.5 - height / 2.0) * s.tz / f)) AS BIGINT) + 1 AS vi
+    FROM sprite_cols s JOIN sprite_windows w ON w.id = s.id AND w.c = s.c
+    JOIN render_sprite_columns col ON col.sprite = s.name
+        AND col.u = CASE WHEN s.mirrored THEN s.sw - 1 - s.screen_u ELSE s.screen_u END
+    CROSS JOIN camera,
+    LATERAL generate_series(
+        greatest(0, CAST(ceil(greatest(s.sy0, w.lo) - 0.5) AS BIGINT)),
+        least(height - 1, CAST(ceil(least(s.sy1, w.hi) - 0.5) AS BIGINT) - 1)) g(y)
+    WHERE s.screen_u BETWEEN 0 AND s.sw - 1
+),
+sprite_pixels AS (
+    SELECT s.*, list_extract(atlas.pixels, s.tex_offset + s.vi) AS texel
+    FROM sprite_samples s CROSS JOIN render_sprite_texels atlas
+    WHERE s.vi BETWEEN 1 AND s.tex_length
+),
+sprite_best AS (
+    -- Transparency is discarded BEFORE depth ordering (a hole reveals the next
+    -- sprite, not just the old surface). Tie-break by the map's thing id.
+    SELECT c, y, arg_min(list_extract(lit.colors, level * 256 + texel + 1),
+                        struct_pack(tz := tz, id := id)) AS packed
+    FROM sprite_pixels CROSS JOIN render_lit lit WHERE texel IS NOT NULL
+    GROUP BY c, y
 )
 SELECT x.c AS x, y.y AS y,
-       coalesce(best.surface, 'empty') AS surface,
-       coalesce(best.r, 0) AS r, coalesce(best.g, 0) AS g, coalesce(best.b, 0) AS b
+       CASE WHEN sb.packed IS NOT NULL THEN 'sprite' ELSE coalesce(best.surface, 'empty') END AS surface,
+       coalesce(sb.packed // 65536, best.r, 0) AS r,
+       coalesce(sb.packed // 256 % 256, best.g, 0) AS g,
+       coalesce(sb.packed % 256, best.b, 0) AS b
 FROM generate_series(0, width - 1) x(c)
 CROSS JOIN generate_series(0, height - 1) y(y)
-LEFT JOIN best ON best.c = x.c AND best.y = y.y;
+LEFT JOIN best ON best.c = x.c AND best.y = y.y
+LEFT JOIN sprite_best sb ON sb.c = x.c AND sb.y = y.y;
 
 -- T3 (D8): the same framebuffer as a terminal frame: the view rendered at cols x
 -- rows*2 pixels, two pixel rows packed into one text row of ▀ cells (foreground =

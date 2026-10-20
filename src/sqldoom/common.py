@@ -25,7 +25,26 @@ def load_render(con) -> None:
         has_textures = False
     if not has_textures:
         raise NoTextures("database has no textures: re-run sqldoom-import --force")
+    create_missing_sprite_tables(con)
     con.execute(resource_files("sqldoom").joinpath("sql/render.sql").read_text())
+
+
+# P8 (sprites): empty stand-ins for databases imported before Part 4b, so they render
+# without sprites. Created only when the imported table is missing: DuckDB resolves TEMP
+# tables before the database's own, so an unconditional stand-in would hide real data.
+SPRITE_STAND_INS = {
+    "sprites": "name VARCHAR PRIMARY KEY, width INTEGER, height INTEGER, "
+               "left_offset INTEGER, top_offset INTEGER",
+    "sprite_columns": "sprite VARCHAR, u INTEGER, pixels UTINYINT[], PRIMARY KEY (sprite, u)",
+    "thing_types": "type INTEGER PRIMARY KEY, sprite VARCHAR, frame VARCHAR, full_bright BOOLEAN",
+}
+
+
+def create_missing_sprite_tables(con) -> None:
+    existing = {name for (name,) in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+    for name, columns in SPRITE_STAND_INS.items():
+        if name not in existing:
+            con.execute(f"CREATE TEMP TABLE {name} ({columns})")
 
 
 def parse_size(value: str) -> tuple[int, int]:
